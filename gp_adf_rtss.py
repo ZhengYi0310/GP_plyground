@@ -300,30 +300,49 @@ class GP_ADF_RTSS(Parameterized):
         cov_1 = self.lengthscale_o
         # D x D
         cov_2 = covariance_predicted_s_curr
-
+        # E x 1
         var = self.K_o_var
+
+        # N x E x 1
+        Beta = self.Beta_o
 
         # E x D x D tensor
         Mat1 = list(map(lambda x : x.diag(), self.lengthscale_o))
+        # E x D x D tensor
         Mat2 = list(map(lambda x : torch.potrs((x + cov_2).potrf(upper=False), torch.eye(x.size()), upper=False), Mat1))
         # Mat3 = torch.stack(Mat1) + torch.matmul(torch.stack(Mat1), torch.matmul(Mat2, torch.stack(Mat1)))
         # Mat4 = cov_2 + torch.matmul(cov_2, torch.matmul(Mat2, cov_2))
-        Mu = torch.stack(mu1) \
-             - torch.matmul(torch.stack(Mat1), torch.matmul(torch.stack(Mat2), torch.stack(mu1))) \
-             + mu2 - torch.matmul(cov_2, torch.matmul(torch.stack(Mat2), mu2))
+        # N x E x D x 1
+        Mu = torch.stack(mu1).unsqueeze(1).unsqueeze(-1) \
+             - torch.matmul(torch.stack(Mat1), torch.matmul(torch.stack(Mat2), torch.stack(mu1).unsqueeze(1).unsqueeze(-1))) \
+             + mu2.unsqueeze(1).unsqueeze(-1) - torch.matmul(cov_2, torch.matmul(torch.stack(Mat2), mu2.unsqueeze(1).unsqueeze(-1)))
+        # N x E x D
+        Mu = Mu.squeeze(-1)
 
-        #### TODO change it to lambda
-        Det = torch.det(torch.stack(cov_1)) ** 0.5 * torch.det(torch.stack(cov_1) + cov_2) ** -0.5 * var
+        #### TODO change it to a lambda func ?
+        range_lis = range(0, self.output_o.size()[1])
+        Det1_func = list(map(lambda i : torch.det(torch.stack(cov_1)[i, :, :]), range_lis))
+        Det2_func = list(map(lambda i : torch.det((torch.stack(cov_1)+ cov_2)[i, :, :]), range_lis))
+
+        # E
+        Det = torch.mul(torch.stack(Det1_func) ** 0.5 * torch.stack(Det2_func) ** -0.5, torch.tensor(var))
         ####
 
-        Mat3 = torch.matmul(torch.stack(mu1) - mu2, torch.matmul(torch.stack(Mat2), (torch.stack(mu1) - mu2)))
-        Z = Det * torch.exp(-0.5 * Mat3)
+        # N x E x 1 x 1
+        Mat3 = torch.matmul((torch.stack(mu1) - mu2).unsqueeze(1).unsqueeze(1), torch.matmul(torch.stack(Mat2), (torch.stack(mu1) - mu2)..unsqueeze(1).unsqueeze(-1)))
+        Z = torch.mul(Det, torch.exp(-0.5 * Mat3))
 
-        
+        # N x E x D
+        Cov_yx = torch.matmul(Beta, torch.mul(Z.squeeze(-1), Mu))
+        # E x D
+        Cov_yx = torch.sum(Cov_yx, dim=0)
+        Cov_xy = Cov_yx.transpose(dim0=0, dim1=1)
 
-        for i in range (0, len(self.zip_cached_o)):
-            mu1 = mu1.unsqueeze(1) # N x 1 x D
+        covariance_predicted_o_curr_inv = torch.potrs(covariance_predicted_o_curr.potrf(upper=False), torch.eye(covariance_predicted_o_curr.size()[0]), upper=False),
+        mean_filtered_s_curr = mean_predicted_s_curr + torch.matmul(Cov_xy, torch.matmul(covariance_predicted_o_curr_inv, (observation - mean_predicted_o_curr)))
+        covariance_filtered_s_curr = covariance_predicted_s_curr - torch.matmul(Cov_xy, torch.matmul(covariance_predicted_o_curr_inv, Cov_yx))
 
+        return mean_filtered_s_curr, covariance_filtered_s_curr
 
 
 
