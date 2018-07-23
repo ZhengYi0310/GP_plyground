@@ -120,8 +120,10 @@ class GP_ADF_RTSS(Parameterized):
             self.Ko_var.append(GPo.kernel.get_param("variance"))
             self.lengthscale_s.append(GPo.kernel.get_param("lengthscale"))
 
+        self.zip_cached_s = list(zip(self.Beta_s, self.lengthscale_s, self.K_s_var, self.Kff_s_inv))
+        self.zip_cached_o = list(zip(self.Beta_o, self.lengthscale_o, self.K_o_var, self.Kff_o_inv))
 
-    def mean_propagation(cls, input, Beta, lenthscale, variance, mean, covariance):
+    def mean_propagation(self, input, Beta, lenthscale, variance, mean, covariance):
         """
         mean of the prpagation of GP for uncertain inputs
         :param input: traing inputs N by D or N by E
@@ -151,7 +153,7 @@ class GP_ADF_RTSS(Parameterized):
             mu = torch.matmul(Beta, l)
             return mu
 
-    def variance_propagation(self, input, Beta, lengthscale, Kff_inv, variance, mu, mean, covariance):
+    def variance_propagation(self, input, Beta, lengthscale, variance, Kff_inv, mu, mean, covariance):
         """
         variace of the propagation of GP for uncertain inputs
         :param input: traing inputs N by D or N by E
@@ -211,7 +213,7 @@ class GP_ADF_RTSS(Parameterized):
         """
         assert (input.size()[1] == mean.size()[1])
 
-        # eq 112 of ref.[1]
+        # eq 12 of ref.[1]
         with torch.no_grad():
 
             mat1 = 1 / (1 / lengthscale_a + 1 / lengthscale_b).diag()
@@ -235,6 +237,100 @@ class GP_ADF_RTSS(Parameterized):
             L = variance_a * variance_b * det * torch.mul(torch.exp(mat4), torch.exp(mat6.view(input.size()[0], input.size()[0])))
             cov = torch.matmul(Beta_a, torch.matmul(L, Beta_b)) - mu_a * mu_b
             return cov
+
+    def _prediction(self, input, zip_cached, mean, covariance):
+        """
+        prediction from p(x(k-1) | y(1:k-1) to p(x(k) | y(1:k-1)), p(x(k-1) | y(1:k-1)) is the filtered result of the last step
+            OR
+        prediction from p(x(k) | y(1:k-1) to p(y(k) | y(1:k-1)), p(x(k) | y(1:k-1)) is the predicted result from this step
+        :param mean: mean vector for p(x(k-1) | y(1:k-1) 1 by D
+        :param covariance: covariance matrix for p(x(k-1) | y(1:k-1)
+        :return:
+        """
+
+        #zip_cached = list(zip(self.Beta_s, self.lengthscale_s, self.K_s_var, self.Kff_s_inv))
+        pred_mean = list(map(lambda x : self.mean_propagation(input, x[0], x[1], x[2], mean, covariance), zip_cached))
+        pred_mean_tensor = torch.tensor(pred_mean)
+
+        pred_covariance_tensor = torch.eye(pred_mean_tensor.size()[0])
+
+        zip_cached_pred = list(zip(zip_cached, pred_mean))
+        pred_cov_diag = list(map(lambda x : self.variance_propagation(input, x[0], x[1], x[2], x[3], x[4], mean, covariance), zip_cached_pred))
+
+        for i in range(0, len(zip_cached)):
+            # first fill in the diagonal part
+            pred_covariance_tensor[i, i] = pred_cov_diag[i] / 2.
+            for j in range(i, len(zip_cached)):
+                pred_covariance_tensor[i , j] = self.covariance_propagation(input, zip_cached_pred[0][i], zip_cached_pred[1][i], zip_cached_pred[2][i], zip_cached_pred[4][i],
+                                                                                          zip_cached_pred[0][j], zip_cached_pred[1][j], zip_cached_pred[2][j], zip_cached_pred[4][j],
+                                                                                          mean, covariance)
+        pred_covariance_tensor = pred_covariance_tensor + pred_covariance_tensor.transpose(dim0=0, dim1=1)
+
+
+
+        return pred_mean_tensor, pred_covariance_tensor
+
+    def prediction(self, mean_filtered_s_prev, covariance_filtered_s_prev):
+        mean_predicted_s_curr, covariance_filtered_s_curr = self._prediction(self.input_s, self.zip_cached_s, mean_filtered_s_prev, covariance_filtered_s_prev)
+        return mean_predicted_s_curr, covariance_filtered_s_curr
+
+    # def pred_o(self, mean_predicted_s_curr, covariance_predicted_s_curr):
+    #     mean_predicted_o_curr, covariance_predicted_o_curr = self._prediction(self.input_o, self.zip_cached_o,
+    #                                                                          mean_predicted_s_curr,
+    #                                                                          covariance_predicted_s_curr)
+    #     return mean_predicted_o_curr, covariance_predicted_o_curr
+
+    def filtering(self, observation, mean_predicted_s_curr, covariance_predicted_s_curr):
+        """
+        filtering from p(x(k) | y(1:k-1)), updated using p(y(k) | x(k)), to get p(x(k) | y(1:k))
+        :param mean_pred: mean of p(x(k) | y(1:k-1)),
+        :param covariance_pred: covariance of p(x(k) | y(1:k-1))
+        :return:
+        """
+
+        # first compute the predtion of measurement based on the observation model
+        mean_predicted_o_curr, covariance_predicted_o_curr = self._prediction(self.input_o, self.zip_cached_o, mean_predicted_s_curr, covariance_predicted_s_curr)
+
+        # then compute the covariance between observation and state
+        # N x D
+        mu1 = self.input_o
+        # 1 x D
+        mu2 = mean_predicted_s_curr
+        # a list of D X D, length E
+        cov_1 = self.lengthscale_o
+        # D x D
+        cov_2 = covariance_predicted_s_curr
+
+        var = self.K_o_var
+
+        # E x D x D tensor
+        Mat1 = list(map(lambda x : x.diag(), self.lengthscale_o))
+        Mat2 = list(map(lambda x : torch.potrs((x + cov_2).potrf(upper=False), torch.eye(x.size()), upper=False), Mat1))
+        # Mat3 = torch.stack(Mat1) + torch.matmul(torch.stack(Mat1), torch.matmul(Mat2, torch.stack(Mat1)))
+        # Mat4 = cov_2 + torch.matmul(cov_2, torch.matmul(Mat2, cov_2))
+        Mu = torch.stack(mu1) \
+             - torch.matmul(torch.stack(Mat1), torch.matmul(torch.stack(Mat2), torch.stack(mu1))) \
+             + mu2 - torch.matmul(cov_2, torch.matmul(torch.stack(Mat2), mu2))
+
+        #### TODO change it to lambda
+        Det = torch.det(torch.stack(cov_1)) ** 0.5 * torch.det(torch.stack(cov_1) + cov_2) ** -0.5 * var
+        ####
+
+        Mat3 = torch.matmul(torch.stack(mu1) - mu2, torch.matmul(torch.stack(Mat2), (torch.stack(mu1) - mu2)))
+        Z = Det * torch.exp(-0.5 * Mat3)
+
+        
+
+        for i in range (0, len(self.zip_cached_o)):
+            mu1 = mu1.unsqueeze(1) # N x 1 x D
+
+
+
+
+
+
+
+
 
 
 
