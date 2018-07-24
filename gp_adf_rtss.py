@@ -270,18 +270,28 @@ class GP_ADF_RTSS(Parameterized):
         pred_mean = list(map(lambda x : self.mean_propagation(input, x[0], x[1], x[2], mean, covariance), zip_cached))
         pred_mean_tensor = torch.tensor(pred_mean)
 
-        pred_covariance_tensor = torch.eye(pred_mean_tensor.size()[0])
+        #pred_covariance_tensor = torch.eye(pred_mean_tensor.size()[0])
 
         zip_cached_pred = list(zip(zip_cached, pred_mean))
         pred_cov_diag = list(map(lambda x : self.variance_propagation(input, x[0], x[1], x[2], x[3], x[4], mean, covariance), zip_cached_pred))
 
-        for i in range(0, len(zip_cached)):
-            # first fill in the diagonal part
-            pred_covariance_tensor[i, i] = pred_cov_diag[i] / 2.
-            for j in range(i, len(zip_cached)):
-                pred_covariance_tensor[i , j] = self.covariance_propagation(input, zip_cached_pred[0][i], zip_cached_pred[1][i], zip_cached_pred[2][i], zip_cached_pred[4][i],
-                                                                                          zip_cached_pred[0][j], zip_cached_pred[1][j], zip_cached_pred[2][j], zip_cached_pred[4][j],
-                                                                                          mean, covariance)
+        pred_covariance_tensor = pred_cov_diag / 2.
+
+        range_lis = [(i ,j) for i in range(0, len(zip_cached)) for j in range(i, len(zip_cached))]
+        list_cov = list(map(lambda tup : self.covariance_propagation(input, zip_cached_pred[0][tup[0]], zip_cached_pred[1][tup[0]], zip_cached_pred[2][tup[0]], zip_cached_pred[4][tup[0]],
+                                                                            zip_cached_pred[0][tup[1]], zip_cached_pred[1][tup[1]], zip_cached_pred[2][tup[1]], zip_cached_pred[4][tup[1]],
+                                                                            mean, covariance), range_lis))
+        off_diag = torch.tensor(list_cov).view(pred_mean_tensor.size()[0], -1)
+        pred_covariance_tensor += off_diag
+
+
+        # for i in range(0, len(zip_cached)):
+        #     # first fill in the diagonal part
+        #     pred_covariance_tensor[i, i] = pred_cov_diag[i] / 2.
+        #     for j in range(i, len(zip_cached)):
+        #         pred_covariance_tensor[i , j] = self.covariance_propagation(input, zip_cached_pred[0][i], zip_cached_pred[1][i], zip_cached_pred[2][i], zip_cached_pred[4][i],
+        #                                                                                   zip_cached_pred[0][j], zip_cached_pred[1][j], zip_cached_pred[2][j], zip_cached_pred[4][j],
+        #                                                                                   mean, covariance)
         pred_covariance_tensor = pred_covariance_tensor + pred_covariance_tensor.transpose(dim0=0, dim1=1)
 
 
@@ -303,8 +313,6 @@ class GP_ADF_RTSS(Parameterized):
         self.covariance_predicted_s_curr_lis.append(self.covariance_predicted_s_curr.cone())
 
         # TODO precomputing the covariance for smoothing here
-        mean_filtered_s_curr        = self.mean_filtered_s_curr_lis[-1]
-        covariance_filtered_s_curr  = self.covariance_filtered_s_curr_lis[-1]
         Cov_Xc_Xp, Cov_Xp_Xc = self._compute_cov(self.input_s, mean_filtered_s_prev, self.mean_predicted_s_curr,
                                                  self.lengthscale_s, covariance_filtered_s_prev, self.K_s_var, self.Beta_s)
         self.covariance_Xpf_Xcd.append(Cov_Xp_Xc.clone())
