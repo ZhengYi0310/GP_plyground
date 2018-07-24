@@ -88,6 +88,24 @@ class GP_ADF_RTSS(Parameterized):
                 vgpmodel = GPRegression(input_s, output_s[:, i], kernel, name="GPo_dim"+ str(i))
                 self.observation_model_list.append(vgpmodel)
 
+        self.mean_predicted_s_curr       = torch.zeros(output_s.size()[1])
+        self.covariance_filtered_s_curr  = torch.eye(output_s.size()[1])
+        self.mean_predicted_o_curr       = torch.zeros(output_o.size()[1])
+        self.covariance_predicted_o_curr = torch.eye(output_o.size()[1])
+
+        self.mean_filtered_s_prev        = torch.zeros(output_s.size()[1])
+        self.covariance_filtered_s_prev  = torch.eye(output_s.size()[1])
+        self.mean_filtered_s_curr        = torch.zeros(output_o.size()[1])
+        self.covariance_filtered_s_curr  = torch.eye(output_o.size()[1])
+
+        # For backwards smoothing
+        self.mean_filtered_s_curr_lis        = []
+        self.covariance_filtered_s_curr_lis  = []
+        self.mean_predicted_s_curr_lis       = []
+        self.covariance_predicted_s_curr_lis = []
+        self.covariance_Xpf_Xcd_list = []
+
+
     def fit_GP(self):
         ### train every GPf and GPo, cache necessary variables for further filtering
         self.Kff_s_inv = []
@@ -270,9 +288,28 @@ class GP_ADF_RTSS(Parameterized):
 
         return pred_mean_tensor, pred_covariance_tensor
 
+    def step(self):
+        """
+        set curret filtered value to previous filtered value when new observation arrives
+        :return:
+        """
+        self.mean_filtered_s_prev = self.mean_filtered_s_curr.clone()
+        self.covariance_filtered_s_prev = self.covariance_filtered_s_curr.clone()
+
     def prediction(self, mean_filtered_s_prev, covariance_filtered_s_prev):
-        mean_predicted_s_curr, covariance_filtered_s_curr = self._prediction(self.input_s, self.zip_cached_s, mean_filtered_s_prev, covariance_filtered_s_prev)
-        return mean_predicted_s_curr, covariance_filtered_s_curr
+        mean_predicted_s_curr, covariance_predicted_s_curr = self._prediction(self.input_s, self.zip_cached_s, mean_filtered_s_prev, covariance_filtered_s_prev)
+        self.mean_predicted_s_curr, self.covariance_predicted_s_curr = mean_predicted_s_curr, covariance_predicted_s_curr
+        self.mean_predicted_s_curr_lis.append(self.mean_predicted_s_curr.clone())
+        self.covariance_predicted_s_curr_lis.append(self.covariance_predicted_s_curr.cone())
+
+        # TODO precomputing the covariance for smoothing here
+        mean_filtered_s_curr        = self.mean_filtered_s_curr_lis[-1]
+        covariance_filtered_s_curr  = self.covariance_filtered_s_curr_lis[-1]
+        Cov_Xc_Xp, Cov_Xp_Xc = self._compute_cov(self.input_s, mean_filtered_s_prev, self.mean_predicted_s_curr,
+                                                 self.lengthscale_s, covariance_filtered_s_prev, self.K_s_var, self.Beta_s)
+        self.covariance_Xpf_Xcd.append(Cov_Xp_Xc.clone())
+
+        return mean_predicted_s_curr, covariance_predicted_s_curr
 
     # def pred_o(self, mean_predicted_s_curr, covariance_predicted_s_curr):
     #     mean_predicted_o_curr, covariance_predicted_o_curr = self._prediction(self.input_o, self.zip_cached_o,
@@ -290,59 +327,121 @@ class GP_ADF_RTSS(Parameterized):
 
         # first compute the predtion of measurement based on the observation model
         mean_predicted_o_curr, covariance_predicted_o_curr = self._prediction(self.input_o, self.zip_cached_o, mean_predicted_s_curr, covariance_predicted_s_curr)
+        self.mean_predicted_o_curr, self.covariance_filtered_s_curr = mean_predicted_o_curr, covariance_predicted_o_curr
 
         # then compute the covariance between observation and state
+        Cov_yx, Cov_xy = self._compute_cov(self.input_o, mean_predicted_s_curr, self.mean_predicted_o_curr,
+                                           self.lengthscale_o, covariance_predicted_s_curr, self.K_o_var, self.Beta_o)
+
+        covariance_predicted_o_curr_inv = torch.potrs(covariance_predicted_o_curr.potrf(upper=False), torch.eye(covariance_predicted_o_curr.size()[0]), upper=False)
+        mean_filtered_s_curr = mean_predicted_s_curr + torch.matmul(Cov_xy, torch.matmul(covariance_predicted_o_curr_inv, (observation - mean_predicted_o_curr)))
+        covariance_filtered_s_curr = covariance_predicted_s_curr - torch.matmul(Cov_xy, torch.matmul(covariance_predicted_o_curr_inv, Cov_yx))
+
+        self.mean_predicted_s_curr, self.covariance_filtered_s_curr = mean_filtered_s_curr, covariance_filtered_s_curr
+        self.mean_filtered_s_curr_lis.append(self.mean_filtered_s_curr.clone())
+        self.covariance_predicted_s_curr_lis.append(self.covariance_predicted_s_curr.clone())
+
+
+        return mean_filtered_s_curr, covariance_filtered_s_curr
+
+
+    def _compute_cov(self, mu1, mu2, mu3, lengthscale, cov, var, Beta):
         # N x D
-        mu1 = self.input_o
+        mu1 = mu1
         # 1 x D
-        mu2 = mean_predicted_s_curr
+        mu2 = mu2
         # a list of D X D, length E
-        cov_1 = self.lengthscale_o
+        cov_1 = lengthscale
         # D x D
-        cov_2 = covariance_predicted_s_curr
+        cov_2 = cov
         # E x 1
-        var = self.K_o_var
+        var = var
 
         # N x E x 1
-        Beta = self.Beta_o
+        Beta = Beta
 
         # E x D x D tensor
-        Mat1 = list(map(lambda x : x.diag(), self.lengthscale_o))
+        Mat1 = list(map(lambda x: x.diag(), self.lengthscale_o))
         # E x D x D tensor
-        Mat2 = list(map(lambda x : torch.potrs((x + cov_2).potrf(upper=False), torch.eye(x.size()), upper=False), Mat1))
+        Mat2 = list(map(lambda x: torch.potrs((x + cov_2).potrf(upper=False), torch.eye(x.size()), upper=False), Mat1))
         # Mat3 = torch.stack(Mat1) + torch.matmul(torch.stack(Mat1), torch.matmul(Mat2, torch.stack(Mat1)))
         # Mat4 = cov_2 + torch.matmul(cov_2, torch.matmul(Mat2, cov_2))
         # N x E x D x 1
         Mu = torch.stack(mu1).unsqueeze(1).unsqueeze(-1) \
-             - torch.matmul(torch.stack(Mat1), torch.matmul(torch.stack(Mat2), torch.stack(mu1).unsqueeze(1).unsqueeze(-1))) \
-             + mu2.unsqueeze(1).unsqueeze(-1) - torch.matmul(cov_2, torch.matmul(torch.stack(Mat2), mu2.unsqueeze(1).unsqueeze(-1)))
+             - torch.matmul(torch.stack(Mat1),
+                            torch.matmul(torch.stack(Mat2), torch.stack(mu1).unsqueeze(1).unsqueeze(-1))) \
+             + mu2.unsqueeze(1).unsqueeze(-1) - torch.matmul(cov_2, torch.matmul(torch.stack(Mat2),
+                                                                                 mu2.unsqueeze(1).unsqueeze(-1)))
         # N x E x D
         Mu = Mu.squeeze(-1)
 
         #### TODO change it to a lambda func ?
         range_lis = range(0, self.output_o.size()[1])
-        Det1_func = list(map(lambda i : torch.det(torch.stack(cov_1)[i, :, :]), range_lis))
-        Det2_func = list(map(lambda i : torch.det((torch.stack(cov_1)+ cov_2)[i, :, :]), range_lis))
+        Det1_func = list(map(lambda i: torch.det(torch.stack(cov_1)[i, :, :]), range_lis))
+        Det2_func = list(map(lambda i: torch.det((torch.stack(cov_1) + cov_2)[i, :, :]), range_lis))
 
         # E
         Det = torch.mul(torch.stack(Det1_func) ** 0.5 * torch.stack(Det2_func) ** -0.5, torch.tensor(var))
         ####
 
         # N x E x 1 x 1
-        Mat3 = torch.matmul((torch.stack(mu1) - mu2).unsqueeze(1).unsqueeze(1), torch.matmul(torch.stack(Mat2), (torch.stack(mu1) - mu2)..unsqueeze(1).unsqueeze(-1)))
+        Mat3 = torch.matmul((torch.stack(mu1) - mu2).unsqueeze(1).unsqueeze(1),
+                            torch.matmul(torch.stack(Mat2), (torch.stack(mu1) - mu2).unsqueeze(1).unsqueeze(-1)))
         Z = torch.mul(Det, torch.exp(-0.5 * Mat3))
 
         # N x E x D
         Cov_yx = torch.matmul(Beta, torch.mul(Z.squeeze(-1), Mu))
         # E x D
-        Cov_yx = torch.sum(Cov_yx, dim=0)
-        Cov_xy = Cov_yx.transpose(dim0=0, dim1=1)
+        Cov = torch.sum(Cov_yx, dim=0) - torch.ger(mu3, mu2)
+        Cov_T = Cov_yx.transpose(dim0=0, dim1=1)
 
-        covariance_predicted_o_curr_inv = torch.potrs(covariance_predicted_o_curr.potrf(upper=False), torch.eye(covariance_predicted_o_curr.size()[0]), upper=False),
-        mean_filtered_s_curr = mean_predicted_s_curr + torch.matmul(Cov_xy, torch.matmul(covariance_predicted_o_curr_inv, (observation - mean_predicted_o_curr)))
-        covariance_filtered_s_curr = covariance_predicted_s_curr - torch.matmul(Cov_xy, torch.matmul(covariance_predicted_o_curr_inv, Cov_yx))
+        return Cov, Cov_T
 
-        return mean_filtered_s_curr, covariance_filtered_s_curr
+    def smoothing(self, steps=10):
+        """
+        Perform smoothing from the most recent step
+        :param steps: how many steps for the backward smoothing
+        :return:
+        """
+
+        mean_predicted_s_curr_lis = self.mean_predicted_s_curr_lis[::-1]
+        covariance_predicted_s_curr_lis = self.covariance_predicted_s_curr_lis[::-1]
+        mean_filtered_s_curr_lis = self.mean_filtered_s_curr_lis[::-1]
+        covariance_s_filtered_curr_lis = self.covariance_filtered_s_curr_lis[::-1]
+        covariance_Xpf_Xcd_list = self.covariance_Xpf_Xcd_list[::-1]
+
+        # start from the most recent step
+        mean_smoothed_curr = mean_filtered_s_curr_lis[0]
+        covariance_smoothed_curr = covariance_s_filtered_curr_lis[0]
+
+        mean_smoothed_curr_lis = [mean_smoothed_curr.clone()]
+        covariance_smoothed_curr_lis = [covariance_smoothed_curr.clone()]
+
+
+        for i in range(0, steps):
+            # first compute the joint distribution of p(x(t-1), x(t) | z(1:t-1))
+            covariance_Xpf_Xcd      = covariance_Xpf_Xcd_list[i]
+
+            mean_filtered_s         = mean_filtered_s_curr_lis[i+1]
+            covariance_filtered_s   = covariance_s_filtered_curr_lis[i+1]
+
+            mean_predicted_s        = mean_predicted_s_curr_lis[1]
+            covariance_predicted_s = covariance_predicted_s_curr_lis[i]
+
+            Mat1 = torch.potrs(covariance_predicted_s.potrf(upper=False), torch.eye(covariance_predicted_s.size()[0]), upper=False)
+            J_prev = torch.matmul(covariance_Xpf_Xcd, Mat1)
+
+            mean_smoothed_curr = mean_filtered_s + torch.matmul(J_prev, (mean_smoothed_curr - mean_predicted_s))
+            covariance_smoothed_curr = covariance_filtered_s + torch.matmul(J_prev, torch.matmul(covariance_smoothed_curr - covariance_predicted_s, J_prev))
+
+            mean_smoothed_curr_lis.append(mean_smoothed_curr.clone())
+            covariance_smoothed_curr_lis.append(covariance_smoothed_curr.clone())
+
+        return mean_filtered_s_curr_lis, covariance_smoothed_curr_lis
+
+
+
+
 
 
 
