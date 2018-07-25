@@ -25,9 +25,9 @@ class GP_ADF_RTSS(Parameterized):
         [3] Robust Filtering and Smoothing with Gaussian Processes
     """
 
-    def __init__(self, input_s, output_s, input_o, output_o, state_dim, observation_dim, option='SSGP', inducing_size=100, name='GP_ADF_RTSS'):
+    def __init__(self, input_s, output_s, input_o, output_o, option='SSGP', inducing_size=100, name='GP_ADF_RTSS'):
         """
-        :param input_s: training inputs for the state transtion model N by D tensor
+        :param input_s: training inputs for the state transition model N by D tensor
         :param output_s: training outputs for the state transition model N by E tensor
         :param input_o: training inputs for the observation model N by E tensor
         :param output_o: training outputs for the observation model N by F tensor
@@ -59,9 +59,9 @@ class GP_ADF_RTSS(Parameterized):
             for i in range(self.output_s.size()[1]):
                 kernel = RBF(input_dim=self.input_s.size()[0], lengthscale=torch.ones(self.input_s.size()[0]))
 
-                range_lis = range(0, output_s.size()[0])
+                range_lis = range(0, input_s.size()[0])
                 random.shuffle(range_lis)
-                Xu = input_s[input_s[0:inducing_size], :]
+                Xu = input_s[range_lis[0:inducing_size], :]
 
                 # need to set the name for different model, otherwise pyro will clear the parameter storage
                 ssgpmodel = SparseGPRegression(input_s, output_s[:, i], kernel, Xu, name="SSGPs_dim" + str(i))
@@ -72,7 +72,7 @@ class GP_ADF_RTSS(Parameterized):
 
                 range_lis = range(0, output_o.size()[0])
                 random.shuffle(range_lis)
-                Xu = input_o[input_o[0:inducing_size], :]
+                Xu = input_o[range_lis[0:inducing_size], :]
 
                 ssgpmodel = SparseGPRegression(input_o, output_o[:, i], kernel, Xu, name="SSGPo_dim" + str(i))
                 self.state_transition_model_list.append(ssgpmodel)
@@ -88,22 +88,33 @@ class GP_ADF_RTSS(Parameterized):
                 vgpmodel = GPRegression(input_s, output_s[:, i], kernel, name="GPo_dim"+ str(i))
                 self.observation_model_list.append(vgpmodel)
 
-        self.mean_predicted_s_curr       = torch.zeros(output_s.size()[1])
-        self.covariance_filtered_s_curr  = torch.eye(output_s.size()[1])
-        self.mean_predicted_o_curr       = torch.zeros(output_o.size()[1])
-        self.covariance_predicted_o_curr = torch.eye(output_o.size()[1])
+        # self.mean_predicted_s_curr       = torch.zeros(output_s.size()[1])
+        # self.covariance_filtered_s_curr  = torch.eye(output_s.size()[1])
+        # self.mean_predicted_o_curr       = torch.zeros(output_o.size()[1])
+        # self.covariance_predicted_o_curr = torch.eye(output_o.size()[1])
 
-        self.mean_filtered_s_prev        = torch.zeros(output_s.size()[1])
-        self.covariance_filtered_s_prev  = torch.eye(output_s.size()[1])
-        self.mean_filtered_s_curr        = torch.zeros(output_o.size()[1])
-        self.covariance_filtered_s_curr  = torch.eye(output_o.size()[1])
+        self.mu_s_curr      = torch.zeros(output_s.size()[1])
+        self.sigma_s_curr   = torch.eye(output_s.size()[1])
+        self.mu_o_curr      = torch.zeros(output_o.size()[1])
+        self.sigma_o_curr     = torch.eye(output_s.size()[1])
+
+        # self.mean_filtered_s_prev        = torch.zeros(output_s.size()[1])
+        # self.covariance_filtered_s_prev  = torch.eye(output_s.size()[1])
+        # self.mean_filtered_s_curr        = torch.zeros(output_o.size()[1])
+        # self.covariance_filtered_s_curr  = torch.eye(output_o.size()[1])
+
+        self.mu_hat_s_curr      = torch.zeros(output_s.size()[1])
+        self.sigma_hat_s_curr   = torch.eye(output_s.size()[1])
+        self.mu_hat_s_prev      = torch.zeros(output_s.size()[1])
+        self.sigma_hat_s_prev   = torch.eye(output_s.size()[1])
 
         # For backwards smoothing
-        self.mean_filtered_s_curr_lis        = []
-        self.covariance_filtered_s_curr_lis  = []
-        self.mean_predicted_s_curr_lis       = []
-        self.covariance_predicted_s_curr_lis = []
-        self.covariance_Xpf_Xcd_list = []
+        self.mu_hat_s_curr_lis     = []
+        self.sigma_hat_s_curr_lis  = []
+        self.mu_s_curr_lis         = []
+        self.sigma_s_curr_lis      = []
+
+        self.sigma_Xpf_Xcd_lis     = []
 
 
     def fit_GP(self):
@@ -117,25 +128,25 @@ class GP_ADF_RTSS(Parameterized):
         self.lengthscale_s = []
         self.lengthscale_o = []
 
-
+        # TODO CACHE DIFFERENT STUFF IF USE SPARSE GP
         pyro.clear_param_store()
         num_steps = 2000
         for (i, GPs) in self.state_transition_model_list:
             GPs.optimize(optimizer=Adam({"lr": 0.01}), num_steps=num_steps)
             Kff = GPs.kernel(self.input_s).view(-1)[::self.input_s.size()[0] + 1] + GPs.get_param('noise')
             Lff=  Kff.potrf(upper=False)
-            self.Kffs_inv.append(torch.potrs(torch.eye(self.input_s.size()[0]), Lff, upper=False))
+            self.Kff_s_inv.append(torch.potrs(torch.eye(self.input_s.size()[0]), Lff, upper=False))
             self.Beta_s.append(torch.potrs(self.output_s[:, i], Lff, upper=False))
-            self.Ks_var.append(GPs.kernel.get_param("variance"))
+            self.K_s_var.append(GPs.kernel.get_param("variance"))
             self.lengthscale_s.append(GPs.kernel.get_param("lengthscale"))
 
         for (i ,GPo) in self.observation_model_list:
             GPo.optimize(optimizer=Adam({"lr": 0.01}), num_steps=num_steps)
             Kff = GPo.kernel(self.input_s).view(-1)[::self.input_s.size()[0] + 1] + GPo.get_param('noise')
             Lff = Kff.potrf(upper=False)
-            self.Kffo_inv.append(torch.potrs(torch.eye(self.input_s.size()[0]), Lff, upper=False))
+            self.Kff_o_inv.append(torch.potrs(torch.eye(self.input_s.size()[0]), Lff, upper=False))
             self.Beta_o.append(torch.potrs(self.output_s[:, i], Lff, upper=False))
-            self.Ko_var.append(GPo.kernel.get_param("variance"))
+            self.K_o_var.append(GPo.kernel.get_param("variance"))
             self.lengthscale_s.append(GPo.kernel.get_param("lengthscale"))
 
         self.zip_cached_s = list(zip(self.Beta_s, self.lengthscale_s, self.K_s_var, self.Kff_s_inv))
@@ -303,29 +314,27 @@ class GP_ADF_RTSS(Parameterized):
         set curret filtered value to previous filtered value when new observation arrives
         :return:
         """
-        self.mean_filtered_s_prev = self.mean_filtered_s_curr.clone()
-        self.covariance_filtered_s_prev = self.covariance_filtered_s_curr.clone()
+        self.mu_hat_s_prev = self.mu_hat_s_curr.clone()
+        self.sigma_hat_s_prev = self.sigma_hat_s_curr.clone()
+        #self.mean_filtered_s_prev = self.mean_filtered_s_curr.clone()
+        #self.covariance_filtered_s_prev = self.covariance_filtered_s_curr.clone()
 
-    def prediction(self, mean_filtered_s_prev, covariance_filtered_s_prev):
-        mean_predicted_s_curr, covariance_predicted_s_curr = self._prediction(self.input_s, self.zip_cached_s, mean_filtered_s_prev, covariance_filtered_s_prev)
-        self.mean_predicted_s_curr, self.covariance_predicted_s_curr = mean_predicted_s_curr, covariance_predicted_s_curr
-        self.mean_predicted_s_curr_lis.append(self.mean_predicted_s_curr.clone())
-        self.covariance_predicted_s_curr_lis.append(self.covariance_predicted_s_curr.cone())
+    def prediction(self, mu_hat_s_prev, sigma_hat_s_prev):
 
-        # TODO precomputing the covariance for smoothing here
-        Cov_Xc_Xp, Cov_Xp_Xc = self._compute_cov(self.input_s, mean_filtered_s_prev, self.mean_predicted_s_curr,
-                                                 self.lengthscale_s, covariance_filtered_s_prev, self.K_s_var, self.Beta_s)
-        self.covariance_Xpf_Xcd.append(Cov_Xp_Xc.clone())
+        #mean_predicted_s_curr, covariance_predicted_s_curr = self._prediction(self.input_s, self.zip_cached_s, mu_hat_s_prev, sigma_hat_s_prev)
+        mu_s_curr, sigma_s_curr = self._prediction(self.input_s, self.zip_cached_s, mu_hat_s_prev,
+                                                             sigma_hat_s_prev)
+        self.mu_s_curr, self.sigma_s_curr = mu_s_curr, sigma_s_curr
+        self.mu_s_curr_lis.append(self.mu_s_curr.clone())
+        self.sigma_curr_lis.append(self.sigma_s_curr.cone())
 
-        return mean_predicted_s_curr, covariance_predicted_s_curr
+        sigma_Xcd_Xpf, sigma_Xpf_Xcd = self._compute_cov(self.input_s, mu_hat_s_prev, self.mu_s_curr,
+                                                 self.lengthscale_s, sigma_hat_s_prev, self.K_s_var, self.Beta_s)
+        self.sigma_Xpf_Xcd_lis.append(sigma_Xpf_Xcd .clone())
 
-    # def pred_o(self, mean_predicted_s_curr, covariance_predicted_s_curr):
-    #     mean_predicted_o_curr, covariance_predicted_o_curr = self._prediction(self.input_o, self.zip_cached_o,
-    #                                                                          mean_predicted_s_curr,
-    #                                                                          covariance_predicted_s_curr)
-    #     return mean_predicted_o_curr, covariance_predicted_o_curr
+        return self.mu_s_curr, self.sigma_s_curr
 
-    def filtering(self, observation, mean_predicted_s_curr, covariance_predicted_s_curr):
+    def filtering(self, observation, mu_s_curr, sigma_s_curr):
         """
         filtering from p(x(k) | y(1:k-1)), updated using p(y(k) | x(k)), to get p(x(k) | y(1:k))
         :param mean_pred: mean of p(x(k) | y(1:k-1)),
@@ -334,23 +343,65 @@ class GP_ADF_RTSS(Parameterized):
         """
 
         # first compute the predtion of measurement based on the observation model
-        mean_predicted_o_curr, covariance_predicted_o_curr = self._prediction(self.input_o, self.zip_cached_o, mean_predicted_s_curr, covariance_predicted_s_curr)
-        self.mean_predicted_o_curr, self.covariance_filtered_s_curr = mean_predicted_o_curr, covariance_predicted_o_curr
+        mu_o_curr, sigma_o_curr = self._prediction(self.input_o, self.zip_cached_o, mu_s_curr, sigma_s_curr)
+        self.mu_o_curr, self.sigma_o_curr = mu_o_curr, sigma_o_curr
 
         # then compute the covariance between observation and state
-        Cov_yx, Cov_xy = self._compute_cov(self.input_o, mean_predicted_s_curr, self.mean_predicted_o_curr,
-                                           self.lengthscale_o, covariance_predicted_s_curr, self.K_o_var, self.Beta_o)
+        Cov_yx, Cov_xy = self._compute_cov(self.input_o, mu_s_curr, self.mu_o_curr,
+                                           self.lengthscale_o, sigma_s_curr, self.K_o_var, self.Beta_o)
 
-        covariance_predicted_o_curr_inv = torch.potrs(covariance_predicted_o_curr.potrf(upper=False), torch.eye(covariance_predicted_o_curr.size()[0]), upper=False)
-        mean_filtered_s_curr = mean_predicted_s_curr + torch.matmul(Cov_xy, torch.matmul(covariance_predicted_o_curr_inv, (observation - mean_predicted_o_curr)))
-        covariance_filtered_s_curr = covariance_predicted_s_curr - torch.matmul(Cov_xy, torch.matmul(covariance_predicted_o_curr_inv, Cov_yx))
+        sigma_o_curr_inv = torch.potrs(sigma_o_curr.potrf(upper=False), torch.eye(sigma_o_curr.size()[0]), upper=False)
+        mu_hat_s_curr = mu_s_curr + torch.matmul(Cov_xy, torch.matmul(sigma_o_curr_inv, (observation - mu_o_curr)))
+        sigma_hat_s_curr = sigma_s_curr - torch.matmul(Cov_xy, torch.matmul(sigma_o_curr_inv, Cov_yx))
 
-        self.mean_predicted_s_curr, self.covariance_filtered_s_curr = mean_filtered_s_curr, covariance_filtered_s_curr
-        self.mean_filtered_s_curr_lis.append(self.mean_filtered_s_curr.clone())
-        self.covariance_predicted_s_curr_lis.append(self.covariance_predicted_s_curr.clone())
+        self.mu_hat_s_curr, self.sigma_hat_s_curr = mu_hat_s_curr, sigma_hat_s_curr
+        self.mu_hat_s_curr_lis.append(self.mu_hat_s_curr.clone())
+        self.sigma_hat_s_curr_lis.append(self.sigma_hat_s_curr.clone())
 
 
-        return mean_filtered_s_curr, covariance_filtered_s_curr
+        return mu_hat_s_curr, sigma_hat_s_curr
+
+    def smoothing(self, steps=10):
+        """
+        Perform smoothing from the most recent step
+        :param steps: how many steps for the backward smoothing
+        :return:
+        """
+
+        mu_s_curr_lis = self.mu_s_curr_lis[::-1]
+        sigma_s_curr_lis = self.sigma_s_curr_lis[::-1]
+        mu_hat_s_curr_lis = self.mu_hat_s_curr_lis[::-1]
+        sigma_hat_s_curr_lis = self.sigma_hat_s_curr_lis[::-1]
+        sigma_Xpf_Xcd_lis = self.sigma_Xpf_Xcd_lis[::-1]
+
+        # start from the most recent step
+        mu_smoothed_curr = mu_hat_s_curr_lis[0]
+        sigma_smoothed_curr = sigma_hat_s_curr_lis[0]
+
+        mu_smoothed_curr_lis = [mu_smoothed_curr.clone()]
+        sigma_smoothed_curr_lis = [sigma_smoothed_curr.clone()]
+
+
+        for i in range(0, steps):
+            # first compute the joint distribution of p(x(t-1), x(t) | z(1:t-1))
+            sigma_Xpf_Xcd     = sigma_Xpf_Xcd_lis[i]
+
+            mu_hat_s          = mu_hat_s_curr_lis[i+1]
+            sigma_hat_s       = sigma_hat_s_curr_lis[i+1]
+
+            mu_s              = mu_s_curr_lis[1]
+            sigma_s           = sigma_s_curr_lis[i]
+
+            Mat1 = torch.potrs(sigma_s.potrf(upper=False), torch.eye(sigma_hat_s.size()[0]), upper=False)
+            J_prev = torch.matmul(sigma_Xpf_Xcd, Mat1)
+
+            mu_smoothed_curr = mu_hat_s + torch.matmul(J_prev, (mu_smoothed_curr - mu_s))
+            sigma_smoothed_curr = sigma_hat_s + torch.matmul(J_prev, torch.matmul(sigma_smoothed_curr - sigma_s, J_prev))
+
+            mu_smoothed_curr_lis.append(mu_smoothed_curr.clone())
+            sigma_smoothed_curr_lis.append(sigma_smoothed_curr.clone())
+
+        return mu_smoothed_curr_lis, sigma_smoothed_curr_lis
 
 
     def _compute_cov(self, mu1, mu2, mu3, lengthscale, cov, var, Beta):
@@ -405,47 +456,7 @@ class GP_ADF_RTSS(Parameterized):
 
         return Cov, Cov_T
 
-    def smoothing(self, steps=10):
-        """
-        Perform smoothing from the most recent step
-        :param steps: how many steps for the backward smoothing
-        :return:
-        """
 
-        mean_predicted_s_curr_lis = self.mean_predicted_s_curr_lis[::-1]
-        covariance_predicted_s_curr_lis = self.covariance_predicted_s_curr_lis[::-1]
-        mean_filtered_s_curr_lis = self.mean_filtered_s_curr_lis[::-1]
-        covariance_s_filtered_curr_lis = self.covariance_filtered_s_curr_lis[::-1]
-        covariance_Xpf_Xcd_list = self.covariance_Xpf_Xcd_list[::-1]
-
-        # start from the most recent step
-        mean_smoothed_curr = mean_filtered_s_curr_lis[0]
-        covariance_smoothed_curr = covariance_s_filtered_curr_lis[0]
-
-        mean_smoothed_curr_lis = [mean_smoothed_curr.clone()]
-        covariance_smoothed_curr_lis = [covariance_smoothed_curr.clone()]
-
-
-        for i in range(0, steps):
-            # first compute the joint distribution of p(x(t-1), x(t) | z(1:t-1))
-            covariance_Xpf_Xcd      = covariance_Xpf_Xcd_list[i]
-
-            mean_filtered_s         = mean_filtered_s_curr_lis[i+1]
-            covariance_filtered_s   = covariance_s_filtered_curr_lis[i+1]
-
-            mean_predicted_s        = mean_predicted_s_curr_lis[1]
-            covariance_predicted_s = covariance_predicted_s_curr_lis[i]
-
-            Mat1 = torch.potrs(covariance_predicted_s.potrf(upper=False), torch.eye(covariance_predicted_s.size()[0]), upper=False)
-            J_prev = torch.matmul(covariance_Xpf_Xcd, Mat1)
-
-            mean_smoothed_curr = mean_filtered_s + torch.matmul(J_prev, (mean_smoothed_curr - mean_predicted_s))
-            covariance_smoothed_curr = covariance_filtered_s + torch.matmul(J_prev, torch.matmul(covariance_smoothed_curr - covariance_predicted_s, J_prev))
-
-            mean_smoothed_curr_lis.append(mean_smoothed_curr.clone())
-            covariance_smoothed_curr_lis.append(covariance_smoothed_curr.clone())
-
-        return mean_filtered_s_curr_lis, covariance_smoothed_curr_lis
 
 
 
