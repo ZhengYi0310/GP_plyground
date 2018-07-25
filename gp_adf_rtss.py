@@ -89,20 +89,10 @@ class GP_ADF_RTSS(Parameterized):
                 self.observation_model_list.append(vgpmodel)
         self.option = option
 
-        # self.mean_predicted_s_curr       = torch.zeros(y_s.size()[1])
-        # self.covariance_filtered_s_curr  = torch.eye(y_s.size()[1])
-        # self.mean_predicted_o_curr       = torch.zeros(y_o.size()[1])
-        # self.covariance_predicted_o_curr = torch.eye(y_o.size()[1])
-
         self.mu_s_curr      = torch.zeros(y_s.size()[1])
         self.sigma_s_curr   = torch.eye(y_s.size()[1])
         self.mu_o_curr      = torch.zeros(y_o.size()[1])
         self.sigma_o_curr     = torch.eye(y_s.size()[1])
-
-        # self.mean_filtered_s_prev        = torch.zeros(y_s.size()[1])
-        # self.covariance_filtered_s_prev  = torch.eye(y_s.size()[1])
-        # self.mean_filtered_s_curr        = torch.zeros(y_o.size()[1])
-        # self.covariance_filtered_s_curr  = torch.eye(y_o.size()[1])
 
         self.mu_hat_s_curr      = torch.zeros(y_s.size()[1])
         self.sigma_hat_s_curr   = torch.eye(y_s.size()[1])
@@ -376,12 +366,8 @@ class GP_ADF_RTSS(Parameterized):
         :param covariance: covariance matrix for p(x(k-1) | y(1:k-1)
         :return:
         """
-
-        #zip_cached = list(zip(self.Beta_s, self.lengthscale_s, self.K_s_var, self.Kff_s_inv))
         pred_mean = list(map(lambda x : self.mean_propagation(input, x[0], x[1], x[2], mean, covariance), zip_cached))
         pred_mean_tensor = torch.tensor(pred_mean)
-
-        #pred_covariance_tensor = torch.eye(pred_mean_tensor.size()[0])
 
         zip_cached_pred = list(zip(zip_cached, pred_mean))
         pred_cov_diag = list(map(lambda x : self.variance_propagation(input, x[0], x[1], x[2], x[3], x[4], mean, covariance), zip_cached_pred))
@@ -394,18 +380,7 @@ class GP_ADF_RTSS(Parameterized):
                                                                             mean, covariance), range_lis))
         off_diag = torch.tensor(list_cov).view(pred_mean_tensor.size()[0], -1)
         pred_covariance_tensor += off_diag
-
-
-        # for i in range(0, len(zip_cached)):
-        #     # first fill in the diagonal part
-        #     pred_covariance_tensor[i, i] = pred_cov_diag[i] / 2.
-        #     for j in range(i, len(zip_cached)):
-        #         pred_covariance_tensor[i , j] = self.covariance_propagation(input, zip_cached_pred[0][i], zip_cached_pred[1][i], zip_cached_pred[2][i], zip_cached_pred[4][i],
-        #                                                                                   zip_cached_pred[0][j], zip_cached_pred[1][j], zip_cached_pred[2][j], zip_cached_pred[4][j],
-        #                                                                                   mean, covariance)
         pred_covariance_tensor = pred_covariance_tensor + pred_covariance_tensor.transpose(dim0=0, dim1=1)
-
-
 
         return pred_mean_tensor, pred_covariance_tensor
 
@@ -416,8 +391,6 @@ class GP_ADF_RTSS(Parameterized):
         """
         self.mu_hat_s_prev = self.mu_hat_s_curr.clone()
         self.sigma_hat_s_prev = self.sigma_hat_s_curr.clone()
-        #self.mean_filtered_s_prev = self.mean_filtered_s_curr.clone()
-        #self.covariance_filtered_s_prev = self.covariance_filtered_s_curr.clone()
 
     def prediction(self, mu_hat_s_prev, sigma_hat_s_prev, index):
 
@@ -463,10 +436,6 @@ class GP_ADF_RTSS(Parameterized):
                                                self.lengthscale_o, sigma_s_curr, self.K_o_var, self.Beta_o)
             
         self.mu_o_curr, self.sigma_o_curr = mu_o_curr, sigma_o_curr
-
-        # # then compute the covariance between observation and state
-        # Cov_yx, Cov_xy = self._compute_cov(self.X_o, mu_s_curr, self.mu_o_curr,
-        #                                    self.lengthscale_o, sigma_s_curr, self.K_o_var, self.Beta_o)
 
         sigma_o_curr_inv = torch.potrs(sigma_o_curr.potrf(upper=False), torch.eye(sigma_o_curr.size()[0]), upper=False)
         mu_hat_s_curr = mu_s_curr + torch.matmul(Cov_xy, torch.matmul(sigma_o_curr_inv, (observation - mu_o_curr)))
@@ -538,7 +507,7 @@ class GP_ADF_RTSS(Parameterized):
         Beta = Beta
 
         # E x D x D tensor
-        Mat1 = list(map(lambda x: x.diag(), self.lengthscale_o))
+        Mat1 = list(map(lambda x: x.diag(), lengthscale))
         # E x D x D tensor
         Mat2 = list(map(lambda x: torch.potrs((x + cov_2).potrf(upper=False), torch.eye(x.size()), upper=False), Mat1))
         # Mat3 = torch.stack(Mat1) + torch.matmul(torch.stack(Mat1), torch.matmul(Mat2, torch.stack(Mat1)))
@@ -553,7 +522,7 @@ class GP_ADF_RTSS(Parameterized):
         Mu = Mu.squeeze(-1)
 
         #### TODO change it to a lambda func ?
-        range_lis = range(0, self.y_o.size()[1])
+        range_lis = range(0, mu1.size()[1])
         Det1_func = list(map(lambda i: torch.det(torch.stack(cov_1)[i, :, :]), range_lis))
         Det2_func = list(map(lambda i: torch.det((torch.stack(cov_1) + cov_2)[i, :, :]), range_lis))
 
