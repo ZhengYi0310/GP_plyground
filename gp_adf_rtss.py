@@ -25,12 +25,12 @@ class GP_ADF_RTSS(Parameterized):
         [3] Robust Filtering and Smoothing with Gaussian Processes
     """
 
-    def __init__(self, input_s, output_s, input_o, output_o, option='SSGP', inducing_size=100, name='GP_ADF_RTSS'):
+    def __init__(self, X_s, y_s, X_o, y_o, option='SSGP', inducing_size=100, name='GP_ADF_RTSS'):
         """
-        :param input_s: training inputs for the state transition model N by D tensor
-        :param output_s: training outputs for the state transition model N by E tensor
-        :param input_o: training inputs for the observation model N by E tensor
-        :param output_o: training outputs for the observation model N by F tensor
+        :param X_s: training inputs for the state transition model N by D tensor
+        :param y_s: training outputs for the state transition model N by E tensor
+        :param X_o: training inputs for the observation model N by E tensor
+        :param y_o: training outputs for the observation model N by F tensor
         :param state_dim: dimension for the state, D
         :param observation_dim: dimension for the output, E
         :param transition_kernel: kernel function for the
@@ -41,72 +41,73 @@ class GP_ADF_RTSS(Parameterized):
         if option not in ['SSGP', 'GP']:
             raise ValueError('undefined regression option for gp model!')
 
-        assert(input_s.dim() == 2 and output_s.dim() == 2
-               and input_o.dim() == 2 and output_o.dim() == 2), "all data inputs can only have 2 dimensions"
+        assert(X_s.dim() == 2 and y_s.dim() == 2
+               and X_o.dim() == 2 and y_o.dim() == 2), "all data inputs can only have 2 dimensions"
 
         # # use RBF kernel for state transition model and observation model
         # self.state_transition_kernel = RBF(input_dim=state_dim, lengthscale=torch.ones(state_dim) * 0.1)
         # self.observation_kernel = RBF(input_dim=observation_dim, lengthscale=torch.ones(observation_dim) * 0.1)
-        self.input_s = input_s
-        self.output_s = output_s
-        self.input_o = input_o
-        self.output_o = output_o
+        self.X_s = X_s
+        self.y_s = y_s
+        self.X_o = X_o
+        self.y_o = y_o
 
         # choose the model type and initialize based on the option
         self.state_transition_model_list  = []
         self.observation_model_list = []
         if option == 'SSGP':
-            for i in range(self.output_s.size()[1]):
-                kernel = RBF(input_dim=self.input_s.size()[0], lengthscale=torch.ones(self.input_s.size()[0]))
+            for i in range(self.y_s.size()[1]):
+                kernel = RBF(input_dim=self.X_s.size()[0], lengthscale=torch.ones(self.X_s.size()[0]))
 
-                range_lis = range(0, input_s.size()[0])
+                range_lis = range(0, X_s.size()[0])
                 random.shuffle(range_lis)
-                Xu = input_s[range_lis[0:inducing_size], :]
+                Xu = X_s[range_lis[0:inducing_size], :]
 
                 # need to set the name for different model, otherwise pyro will clear the parameter storage
-                ssgpmodel = SparseGPRegression(input_s, output_s[:, i], kernel, Xu, name="SSGPs_dim" + str(i))
+                ssgpmodel = SparseGPRegression(X_s, y_s[:, i], kernel, Xu, name="SSGPs_dim" + str(i))
                 self.state_transition_model_list.append(ssgpmodel)
 
-            for i in range(self.output_o.size()[1]):
-                kernel = RBF(input_dim=self.input_o.size()[0], lengthscale=torch.ones(self.input_o.size()[0]))
+            for i in range(self.y_o.size()[1]):
+                kernel = RBF(input_dim=self.X_o.size()[0], lengthscale=torch.ones(self.X_o.size()[0]))
 
-                range_lis = range(0, output_o.size()[0])
+                range_lis = range(0, y_o.size()[0])
                 random.shuffle(range_lis)
-                Xu = input_o[range_lis[0:inducing_size], :]
+                Xu = X_o[range_lis[0:inducing_size], :]
 
-                ssgpmodel = SparseGPRegression(input_o, output_o[:, i], kernel, Xu, name="SSGPo_dim" + str(i))
+                ssgpmodel = SparseGPRegression(X_o, y_o[:, i], kernel, Xu, name="SSGPo_dim" + str(i))
                 self.state_transition_model_list.append(ssgpmodel)
 
         else:
-            for i in range(self.output_s.size()[1]):
-                kernel = RBF(input_dim=self.input_s.size()[0], lengthscale=torch.ones(self.input_s.size()[0]))
-                vgpmodel = GPRegression(input_s, output_s[:, i], kernel, name="GPs_dim" + str(i))
+            for i in range(self.y_s.size()[1]):
+                kernel = RBF(input_dim=self.X_s.size()[0], lengthscale=torch.ones(self.X_s.size()[0]))
+                vgpmodel = GPRegression(X_s, y_s[:, i], kernel, name="GPs_dim" + str(i))
                 self.observation_model_model_list.append(vgpmodel)
 
-            for i in range(self.output_s.size()[1]):
-                kernel = RBF(input_dim=self.input_s.size()[0], lengthscale=torch.ones(self.input_s.size()[0]))
-                vgpmodel = GPRegression(input_s, output_s[:, i], kernel, name="GPo_dim"+ str(i))
+            for i in range(self.y_s.size()[1]):
+                kernel = RBF(input_dim=self.X_s.size()[0], lengthscale=torch.ones(self.X_s.size()[0]))
+                vgpmodel = GPRegression(X_s, y_s[:, i], kernel, name="GPo_dim"+ str(i))
                 self.observation_model_list.append(vgpmodel)
+        self.option = option
 
-        # self.mean_predicted_s_curr       = torch.zeros(output_s.size()[1])
-        # self.covariance_filtered_s_curr  = torch.eye(output_s.size()[1])
-        # self.mean_predicted_o_curr       = torch.zeros(output_o.size()[1])
-        # self.covariance_predicted_o_curr = torch.eye(output_o.size()[1])
+        # self.mean_predicted_s_curr       = torch.zeros(y_s.size()[1])
+        # self.covariance_filtered_s_curr  = torch.eye(y_s.size()[1])
+        # self.mean_predicted_o_curr       = torch.zeros(y_o.size()[1])
+        # self.covariance_predicted_o_curr = torch.eye(y_o.size()[1])
 
-        self.mu_s_curr      = torch.zeros(output_s.size()[1])
-        self.sigma_s_curr   = torch.eye(output_s.size()[1])
-        self.mu_o_curr      = torch.zeros(output_o.size()[1])
-        self.sigma_o_curr     = torch.eye(output_s.size()[1])
+        self.mu_s_curr      = torch.zeros(y_s.size()[1])
+        self.sigma_s_curr   = torch.eye(y_s.size()[1])
+        self.mu_o_curr      = torch.zeros(y_o.size()[1])
+        self.sigma_o_curr     = torch.eye(y_s.size()[1])
 
-        # self.mean_filtered_s_prev        = torch.zeros(output_s.size()[1])
-        # self.covariance_filtered_s_prev  = torch.eye(output_s.size()[1])
-        # self.mean_filtered_s_curr        = torch.zeros(output_o.size()[1])
-        # self.covariance_filtered_s_curr  = torch.eye(output_o.size()[1])
+        # self.mean_filtered_s_prev        = torch.zeros(y_s.size()[1])
+        # self.covariance_filtered_s_prev  = torch.eye(y_s.size()[1])
+        # self.mean_filtered_s_curr        = torch.zeros(y_o.size()[1])
+        # self.covariance_filtered_s_curr  = torch.eye(y_o.size()[1])
 
-        self.mu_hat_s_curr      = torch.zeros(output_s.size()[1])
-        self.sigma_hat_s_curr   = torch.eye(output_s.size()[1])
-        self.mu_hat_s_prev      = torch.zeros(output_s.size()[1])
-        self.sigma_hat_s_prev   = torch.eye(output_s.size()[1])
+        self.mu_hat_s_curr      = torch.zeros(y_s.size()[1])
+        self.sigma_hat_s_curr   = torch.eye(y_s.size()[1])
+        self.mu_hat_s_prev      = torch.zeros(y_s.size()[1])
+        self.sigma_hat_s_prev   = torch.eye(y_s.size()[1])
 
         # For backwards smoothing
         self.mu_hat_s_curr_lis     = []
@@ -128,29 +129,128 @@ class GP_ADF_RTSS(Parameterized):
         self.lengthscale_s = []
         self.lengthscale_o = []
 
+        if self.options == 'SSGP':
+            self.Xu_s = []
+            self.Xu_o = []
+            self.noise_s = []
+            self.noise_o = []
+
         # TODO CACHE DIFFERENT STUFF IF USE SPARSE GP
         pyro.clear_param_store()
         num_steps = 2000
         for (i, GPs) in self.state_transition_model_list:
             GPs.optimize(optimizer=Adam({"lr": 0.01}), num_steps=num_steps)
-            Kff = GPs.kernel(self.input_s).view(-1)[::self.input_s.size()[0] + 1] + GPs.get_param('noise')
-            Lff=  Kff.potrf(upper=False)
-            self.Kff_s_inv.append(torch.potrs(torch.eye(self.input_s.size()[0]), Lff, upper=False))
-            self.Beta_s.append(torch.potrs(self.output_s[:, i], Lff, upper=False))
-            self.K_s_var.append(GPs.kernel.get_param("variance"))
-            self.lengthscale_s.append(GPs.kernel.get_param("lengthscale"))
+
+            if self.option == 'GP':
+                Kff = GPs.kernel(self.X_s).contiguous().view(-1)[::self.X_s.size()[0] + 1] + GPs.get_param('noise')
+                Lff=  Kff.potrf(upper=False)
+                self.Kff_s_inv.append(torch.potrs(torch.eye(self.X_s.size()[0]), Lff, upper=False))
+                self.Beta_s.append(torch.potrs(self.y_s[:, i], Lff, upper=False))
+                self.K_s_var.append(GPs.kernel.get_param("variance"))
+                self.lengthscale_s.append(GPs.kernel.get_param("lengthscale"))
+
+            else:
+                Xu, noise = GPs.guide()
+                if (GPs.approx == 'DTC' or GPs.option == 'VFE'):
+                    Kff_inv, Beta = self._compute_cached_var_ssgp(GPs, Xu, noise, "DTC")
+
+                    self.Beta_s.append(Beta)
+                    self.Kff_s_inv.append(Kff_inv)
+                    self.K_s_var.append(GPs.kernel.get_param("variance"))
+                    self.lengthscale_s.append(GPs.kernel.get_param("lengthscale"))
+                    self.Xu_s.append(Xu)
+                    self.noise_s.append(noise)
+
+                else:
+                    Kff_inv, Beta = self._compute_cached_var_ssgp(GPs, Xu, noise, "FITC")
+
+                    self.Beta_s.append(Beta)
+                    self.Kff_s_inv.append(Kff_inv)
+                    self.K_s_var.append(GPs.kernel.get_param("variance"))
+                    self.lengthscale_s.append(GPs.kernel.get_param("lengthscale"))
+                    self.Xu_s.append(Xu)
+                    self.noise_s.append(noise)
+
 
         for (i ,GPo) in self.observation_model_list:
             GPo.optimize(optimizer=Adam({"lr": 0.01}), num_steps=num_steps)
-            Kff = GPo.kernel(self.input_s).view(-1)[::self.input_s.size()[0] + 1] + GPo.get_param('noise')
-            Lff = Kff.potrf(upper=False)
-            self.Kff_o_inv.append(torch.potrs(torch.eye(self.input_s.size()[0]), Lff, upper=False))
-            self.Beta_o.append(torch.potrs(self.output_s[:, i], Lff, upper=False))
-            self.K_o_var.append(GPo.kernel.get_param("variance"))
-            self.lengthscale_s.append(GPo.kernel.get_param("lengthscale"))
 
+            if self.option== 'GP':
+                Kff = GPo.kernel(self.X_s).view(-1)[::self.X_s.size()[0] + 1] + GPo.get_param('noise')
+                Lff = Kff.potrf(upper=False)
+                self.Kff_o_inv.append(torch.potrs(torch.eye(self.X_s.size()[0]), Lff, upper=False))
+                self.Beta_o.append(torch.potrs(self.y_s[:, i], Lff, upper=False))
+                self.K_o_var.append(GPo.kernel.get_param("variance"))
+                self.lengthscale_s.append(GPo.kernel.get_param("lengthscale"))
+
+            else:
+                Xu, noise = GPo.guide()
+                if (GPo.approx == 'DTC' or GPo.option == 'VFE'):
+                    Xu, noise = GPo.guide()
+
+                    Kff_inv, Beta = self._compute_cached_var_ssgp(GPo, Xu, noise, "DTC")
+
+                    self.Beta_o.append(Beta)
+                    self.Kff_o_inv.append(Kff_inv)
+                    self.K_o_var.append(GPo.kernel.get_param("variance"))
+                    self.lengthscale_o.append(GPo.kernel.get_param("lengthscale"))
+                    self.Xu_o.append(Xu)
+                    self.noise_o.append(noise)
+
+                else:
+                    Kff_inv, Beta = self._compute_cached_var_ssgp(GPo, Xu, noise, "FITC")
+
+                    self.Beta_o.append(Beta)
+                    self.Kff_o_inv.append(Kff_inv)
+                    self.K_o_var.append(GPo.kernel.get_param("variance"))
+                    self.lengthscale_o.append(GPo.kernel.get_param("lengthscale"))
+                    self.Xu_o.append(Xu)
+                    self.noise_o.append(noise)
         self.zip_cached_s = list(zip(self.Beta_s, self.lengthscale_s, self.K_s_var, self.Kff_s_inv))
         self.zip_cached_o = list(zip(self.Beta_o, self.lengthscale_o, self.K_o_var, self.Kff_o_inv))
+
+    def _compute_cached_var_ssgp(self, model, Xu, noise, option):
+
+
+        M = Xu.size()[0]
+        if (option == 'DTC' or option == 'VFE'):
+            Kuu = model.kernel(Xu).contiguous()
+            Kuu.view(-1)[::M + 1] += model.jitter  # add jitter to the diagonal
+            Luu = Kuu.potrf(upper=False)
+
+            Kuf = model.kernel(Xu, model.X)
+            # variance = model.kernel.get_param("variance")
+
+            Epi = torch.matmul(Kuf, Kuf.t()) / noise + Kuu
+            L_Epi = Epi.potrf(upper=False)
+            Kff_inv = torch.potrs(torch.eye(Xu.size()[0]), L_Epi) - torch.potrs(torch.eye(Xu.size()[0]), Luu)
+            Beta = torch.potrs(torch.matmul(Kuf, model.y), L_Epi) / noise
+
+        else:
+            Kuu = model.kernel(Xu).contiguous()
+            Kuu.view(-1)[::M + 1] += model.jitter  # add jitter to the diagonal
+            Luu = Kuu.potrf(upper=False)
+
+            Kuf = model.kernel(Xu, model.X)
+
+            W = Kuf.trtrs(Luu, upper=False)[0].t()
+            Delta = model.kernel(model.X, diag=True) - W.pow(2).sum(dim=-1) + noise.expand(W.shape[0])
+            L_Delta = Delta.potrf(upper=False)
+
+            U = Kuf.t().trtrs(L_Delta, upper=False)[0]
+
+            Epi = Kuu + torch.matmul(U.t(), U)
+            L_Epi = Epi.potrf(upper=False)
+
+            Z = torch.matmul(U.t(), model.y.trtrs(L_Delta))
+            Beta = torch.potrs(Z, L_Epi)
+
+            Kff_inv = torch.potrs(torch.eye(Xu.size()[0]), L_Epi) + torch.potrs(torch.eye(Xu.size()[0]), Luu)
+
+        return Kff_inv, Beta
+
+
+
 
     def mean_propagation(self, input, Beta, lenthscale, variance, mean, covariance):
         """
@@ -319,22 +419,31 @@ class GP_ADF_RTSS(Parameterized):
         #self.mean_filtered_s_prev = self.mean_filtered_s_curr.clone()
         #self.covariance_filtered_s_prev = self.covariance_filtered_s_curr.clone()
 
-    def prediction(self, mu_hat_s_prev, sigma_hat_s_prev):
+    def prediction(self, mu_hat_s_prev, sigma_hat_s_prev, index):
 
-        #mean_predicted_s_curr, covariance_predicted_s_curr = self._prediction(self.input_s, self.zip_cached_s, mu_hat_s_prev, sigma_hat_s_prev)
-        mu_s_curr, sigma_s_curr = self._prediction(self.input_s, self.zip_cached_s, mu_hat_s_prev,
-                                                             sigma_hat_s_prev)
+        #mean_predicted_s_curr, covariance_predicted_s_curr = self._prediction(self.X_s, self.zip_cached_s, mu_hat_s_prev, sigma_hat_s_prev)
+        if self.option == "GP":
+            mu_s_curr, sigma_s_curr = self._prediction(self.X_s, self.zip_cached_s, mu_hat_s_prev, sigma_hat_s_prev)
+            sigma_Xcd_Xpf, sigma_Xpf_Xcd = self._compute_cov(self.X_s, mu_hat_s_prev, self.mu_s_curr,
+                                                             self.lengthscale_s, sigma_hat_s_prev, self.K_s_var,
+                                                             self.Beta_s)
+        else:
+            assert(index != 0 and index <= len(self.Xu_s)), "state transition models have dimension {}, index is {}.".format(len(self.Xu_s), index)
+            mu_s_curr, sigma_s_curr = self._prediction(self.Xu_s[index], self.zip_cached_s, mu_hat_s_prev, sigma_hat_s_prev)
+            sigma_Xcd_Xpf, sigma_Xpf_Xcd = self._compute_cov(self.Xu_s[index], mu_hat_s_prev, self.mu_s_curr,
+                                                             self.lengthscale_s, sigma_hat_s_prev, self.K_s_var,
+                                                             self.Beta_s)
+            
         self.mu_s_curr, self.sigma_s_curr = mu_s_curr, sigma_s_curr
         self.mu_s_curr_lis.append(self.mu_s_curr.clone())
         self.sigma_curr_lis.append(self.sigma_s_curr.cone())
 
-        sigma_Xcd_Xpf, sigma_Xpf_Xcd = self._compute_cov(self.input_s, mu_hat_s_prev, self.mu_s_curr,
-                                                 self.lengthscale_s, sigma_hat_s_prev, self.K_s_var, self.Beta_s)
+        
         self.sigma_Xpf_Xcd_lis.append(sigma_Xpf_Xcd .clone())
 
         return self.mu_s_curr, self.sigma_s_curr
 
-    def filtering(self, observation, mu_s_curr, sigma_s_curr):
+    def filtering(self, observation, mu_s_curr, sigma_s_curr, index):
         """
         filtering from p(x(k) | y(1:k-1)), updated using p(y(k) | x(k)), to get p(x(k) | y(1:k))
         :param mean_pred: mean of p(x(k) | y(1:k-1)),
@@ -343,12 +452,21 @@ class GP_ADF_RTSS(Parameterized):
         """
 
         # first compute the predtion of measurement based on the observation model
-        mu_o_curr, sigma_o_curr = self._prediction(self.input_o, self.zip_cached_o, mu_s_curr, sigma_s_curr)
+        if self.option == "GP":
+            mu_o_curr, sigma_o_curr = self._prediction(self.X_o, self.zip_cached_o, mu_s_curr, sigma_s_curr)
+            Cov_yx, Cov_xy = self._compute_cov(self.X_o, mu_s_curr, self.mu_o_curr,
+                                               self.lengthscale_o, sigma_s_curr, self.K_o_var, self.Beta_o)
+        else:
+            assert (index != 0 and index <= len(self.Xu_o)), "state transition models have dimension {}, index is {}.".format(len(self.Xu_o), index)
+            mu_s_curr, sigma_s_curr = self._prediction(self.Xu_o[index], self.zip_cached_o, mu_s_curr, sigma_s_curr)
+            Cov_yx, Cov_xy = self._compute_cov(self.Xu_o[index], mu_s_curr, self.mu_o_curr,
+                                               self.lengthscale_o, sigma_s_curr, self.K_o_var, self.Beta_o)
+            
         self.mu_o_curr, self.sigma_o_curr = mu_o_curr, sigma_o_curr
 
-        # then compute the covariance between observation and state
-        Cov_yx, Cov_xy = self._compute_cov(self.input_o, mu_s_curr, self.mu_o_curr,
-                                           self.lengthscale_o, sigma_s_curr, self.K_o_var, self.Beta_o)
+        # # then compute the covariance between observation and state
+        # Cov_yx, Cov_xy = self._compute_cov(self.X_o, mu_s_curr, self.mu_o_curr,
+        #                                    self.lengthscale_o, sigma_s_curr, self.K_o_var, self.Beta_o)
 
         sigma_o_curr_inv = torch.potrs(sigma_o_curr.potrf(upper=False), torch.eye(sigma_o_curr.size()[0]), upper=False)
         mu_hat_s_curr = mu_s_curr + torch.matmul(Cov_xy, torch.matmul(sigma_o_curr_inv, (observation - mu_o_curr)))
@@ -435,7 +553,7 @@ class GP_ADF_RTSS(Parameterized):
         Mu = Mu.squeeze(-1)
 
         #### TODO change it to a lambda func ?
-        range_lis = range(0, self.output_o.size()[1])
+        range_lis = range(0, self.y_o.size()[1])
         Det1_func = list(map(lambda i: torch.det(torch.stack(cov_1)[i, :, :]), range_lis))
         Det2_func = list(map(lambda i: torch.det((torch.stack(cov_1) + cov_2)[i, :, :]), range_lis))
 
