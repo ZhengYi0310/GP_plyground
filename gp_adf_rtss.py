@@ -10,11 +10,13 @@ import pyro
 import pyro.distributions as dist
 from pyro.contrib.gp.kernels import RBF
 from pyro.contrib.gp.likelihoods import Gaussian
-from pyro.contrib.gp.models import GPModel, SparseGPRegression, GPRegression
+from pyro.contrib.gp.models import GPModel, SparseGPRegression, GPRegression,VariationalSparseGP
 from pyro.contrib.gp.util import conditional, Parameterized
 # from pyro.params import param_with_module_name
+from pyro.infer import SVI, Trace_ELBO
 from pyro.optim import Adam
 
+#TODO CACHE THE INVERSE OF LENGTHSCALE ?
 class GP_ADF_RTSS(Parameterized):
     """
     Gaussian process assumed density filter and smoother.
@@ -37,7 +39,7 @@ class GP_ADF_RTSS(Parameterized):
         :param observation_kernel:
         :param options:
         """
-        super(GP_ADF_RTSS).__init__(name)
+        super(GP_ADF_RTSS, self).__init__(name)
         if option not in ['SSGP', 'GP']:
             raise ValueError('undefined regression option for gp model!')
 
@@ -51,42 +53,46 @@ class GP_ADF_RTSS(Parameterized):
         self.y_s = y_s
         self.X_o = X_o
         self.y_o = y_o
+        # print(X_s.dtype)
+        # print(y_s.dtype)
+        # print(X_o.dtype)
+        # print(y_o.dtype)
 
         # choose the model type and initialize based on the option
         self.state_transition_model_list  = []
         self.observation_model_list = []
         if option == 'SSGP':
             for i in range(self.y_s.size()[1]):
-                kernel = RBF(input_dim=self.X_s.size()[0], lengthscale=torch.ones(self.X_s.size()[0]))
+                kernel = RBF(input_dim=self.X_s.size()[1], lengthscale=torch.ones(self.X_s.size()[1]) * 10., variance=torch.tensor(5.0),name="GPs_dim" + str(i) + "_RBF")
 
                 range_lis = range(0, X_s.size()[0])
                 random.shuffle(range_lis)
                 Xu = X_s[range_lis[0:inducing_size], :]
 
                 # need to set the name for different model, otherwise pyro will clear the parameter storage
-                ssgpmodel = SparseGPRegression(X_s, y_s[:, i], kernel, Xu, name="SSGPs_dim" + str(i))
+                ssgpmodel = SparseGPRegression(X_s, y_s[:, i], kernel, Xu, name="SSGPs_model_dim" + str(i), jitter=1e-5)
                 self.state_transition_model_list.append(ssgpmodel)
 
             for i in range(self.y_o.size()[1]):
-                kernel = RBF(input_dim=self.X_o.size()[0], lengthscale=torch.ones(self.X_o.size()[0]))
+                kernel = RBF(input_dim=self.X_o.size()[1], lengthscale=torch.ones(self.X_o.size()[1]) * 10, variance=torch.tensor(5.0), name="GPo_dim" + str(i) + "_RBF")
 
                 range_lis = range(0, y_o.size()[0])
                 random.shuffle(range_lis)
                 Xu = X_o[range_lis[0:inducing_size], :]
 
-                ssgpmodel = SparseGPRegression(X_o, y_o[:, i], kernel, Xu, name="SSGPo_dim" + str(i))
+                ssgpmodel = SparseGPRegression(X_o, y_o[:, i], kernel, Xu, name="SSGPo_model_dim" + str(i), noise=torch.tensor(2.))
                 self.state_transition_model_list.append(ssgpmodel)
 
         else:
             for i in range(self.y_s.size()[1]):
-                kernel = RBF(input_dim=self.X_s.size()[0], lengthscale=torch.ones(self.X_s.size()[0]))
-                vgpmodel = GPRegression(X_s, y_s[:, i], kernel, name="GPs_dim" + str(i))
-                self.observation_model_model_list.append(vgpmodel)
+                kernel = RBF(input_dim=self.X_s.size()[1], lengthscale=torch.ones(self.X_s.size()[1]) * 10., variance=torch.tensor(5.0), name="GPs_dim" + str(i) + "_RBF")
+                gpmodel = GPRegression(X_s, y_s[:, i], kernel, name="GPs_model_dim" + str(i), jitter=1e-5)
+                self.state_transition_model_list.append(gpmodel)
 
-            for i in range(self.y_s.size()[1]):
-                kernel = RBF(input_dim=self.X_s.size()[0], lengthscale=torch.ones(self.X_s.size()[0]))
-                vgpmodel = GPRegression(X_s, y_s[:, i], kernel, name="GPo_dim"+ str(i))
-                self.observation_model_list.append(vgpmodel)
+            for i in range(self.y_o.size()[1]):
+                kernel = RBF(input_dim=self.X_o.size()[1], lengthscale=torch.ones(self.X_o.size()[1]) * 10., variance=torch.tensor(5.0), name="GPo_dim" + str(i) + "_RBF")
+                gpmodel = GPRegression(X_o, y_o[:, i], kernel, name="GPo_model_dim"+ str(i), noise=torch.tensor(2.))
+                self.observation_model_list.append(gpmodel)
         self.option = option
 
         self.mu_s_curr      = torch.zeros(y_s.size()[1])
@@ -107,6 +113,8 @@ class GP_ADF_RTSS(Parameterized):
 
         self.sigma_Xpf_Xcd_lis     = []
 
+        print("for state transition model, input dim {} and output dim {}".format(X_s.size()[1], y_s.size()[1]))
+        print("for observation model, input dim {} and output dim {}".format(X_o.size()[1], y_o.size()[1]))
 
     def fit_GP(self):
         ### train every GPf and GPo, cache necessary variables for further filtering
@@ -119,20 +127,26 @@ class GP_ADF_RTSS(Parameterized):
         self.lengthscale_s = []
         self.lengthscale_o = []
 
-        if self.options == 'SSGP':
+        if self.option == 'SSGP':
             self.Xu_s = []
             self.Xu_o = []
             self.noise_s = []
             self.noise_o = []
 
+        self.GPs_losses = []
+        self.GPo_losses = []
         # TODO CACHE DIFFERENT STUFF IF USE SPARSE GP
         pyro.clear_param_store()
-        num_steps = 2000
-        for (i, GPs) in self.state_transition_model_list:
-            GPs.optimize(optimizer=Adam({"lr": 0.01}), num_steps=num_steps)
+        num_steps = 2500
+        for (i, GPs) in enumerate(self.state_transition_model_list):
+            losses = GPs.optimize(optimizer=Adam({"lr": 0.005}), num_steps=num_steps)
+            self.GPs_losses.append(losses)
+            print("training for state transition model {} is done!".format(i))
 
             if self.option == 'GP':
-                Kff = GPs.kernel(self.X_s).contiguous().view(-1)[::self.X_s.size()[0] + 1] + GPs.get_param('noise')
+                Kff = GPs.kernel(self.X_s).contiguous()
+                Kff.view(-1)[::self.X_s.size()[0] + 1] += GPs.get_param('noise')
+
                 Lff=  Kff.potrf(upper=False)
                 self.Kff_s_inv.append(torch.potrs(torch.eye(self.X_s.size()[0]), Lff, upper=False))
                 self.Beta_s.append(torch.potrs(self.y_s[:, i], Lff, upper=False))
@@ -160,18 +174,22 @@ class GP_ADF_RTSS(Parameterized):
                     self.lengthscale_s.append(GPs.kernel.get_param("lengthscale"))
                     self.Xu_s.append(Xu)
                     self.noise_s.append(noise)
+            print("variable caching for state transitino model {} is done!".format(i))
 
 
-        for (i ,GPo) in self.observation_model_list:
-            GPo.optimize(optimizer=Adam({"lr": 0.01}), num_steps=num_steps)
+        for (i ,GPo) in enumerate(self.observation_model_list):
+            losses = GPo.optimize(optimizer=Adam({"lr": 0.005}), num_steps=num_steps)
+            self.GPo_losses.append(losses)
+            print("training for observation model {} is done!".format(i))
 
             if self.option== 'GP':
-                Kff = GPo.kernel(self.X_s).view(-1)[::self.X_s.size()[0] + 1] + GPo.get_param('noise')
+                Kff = GPo.kernel(self.X_o).contiguous()
+                Kff.view(-1)[::self.X_o.size()[0] + 1] += GPo.get_param('noise')
                 Lff = Kff.potrf(upper=False)
-                self.Kff_o_inv.append(torch.potrs(torch.eye(self.X_s.size()[0]), Lff, upper=False))
-                self.Beta_o.append(torch.potrs(self.y_s[:, i], Lff, upper=False))
+                self.Kff_o_inv.append(torch.potrs(torch.eye(self.X_o.size()[0]), Lff, upper=False))
+                self.Beta_o.append(torch.potrs(self.y_o[:, i], Lff, upper=False))
                 self.K_o_var.append(GPo.kernel.get_param("variance"))
-                self.lengthscale_s.append(GPo.kernel.get_param("lengthscale"))
+                self.lengthscale_o.append(GPo.kernel.get_param("lengthscale"))
 
             else:
                 Xu, noise = GPo.guide()
@@ -196,9 +214,20 @@ class GP_ADF_RTSS(Parameterized):
                     self.lengthscale_o.append(GPo.kernel.get_param("lengthscale"))
                     self.Xu_o.append(Xu)
                     self.noise_o.append(noise)
+            print("variable caching for observation model {} is done!".format(i))
+
         self.zip_cached_s = list(zip(self.Beta_s, self.lengthscale_s, self.K_s_var, self.Kff_s_inv))
         self.zip_cached_o = list(zip(self.Beta_o, self.lengthscale_o, self.K_o_var, self.Kff_o_inv))
 
+        # save the mode
+        self._save_model()
+        return self.GPs_losses, self.GPo_losses
+
+    def _save_model(self):
+        pyro.get_param_store().save('gp_adf_rtss.save')
+    def _load_model(self):
+        pass
+    
     def _compute_cached_var_ssgp(self, model, Xu, noise, option):
 
 
@@ -542,6 +571,164 @@ class GP_ADF_RTSS(Parameterized):
         Cov_T = Cov_yx.transpose(dim0=0, dim1=1)
 
         return Cov, Cov_T
+
+
+if __name__ == '__main__':
+
+    import numpy as np
+    import matplotlib.pyplot as plt
+    import random
+
+    plt.style.use("seaborn")
+
+    def ONEDexample(x, noise = True):
+        x_next = 0.5 * x + 25 * x / (1 + x ** 2)
+        if noise:
+             x_next += np.random.normal(scale=0.2)
+        y = 5 * np.sin(x * 2 )
+        if noise:
+            y += np.random.normal(scale=0.01)
+
+        return x_next, y
+
+    input = np.linspace(-10, 10, 1000)
+    input_next = []
+    for x in input:
+        input_next.append(ONEDexample(x)[0])
+
+
+    # plt.scatter(input, np.array(input_next), marker='o', color='b', label='true', s=10)
+    # plt.xlabel(r'$\mu_0$')
+    # plt.legend()
+    # plt.show()
+
+    # Generate the training set
+
+    index = list(range(0, 1000))
+    random.shuffle(index)
+    # X_s = input[index[0:200]]
+    # X_o = X_s.copy()
+    # y_s = []
+    # y_o = []
+    # for x in X_s:
+    #     y_s.append(ONEDexample(x)[0])
+    #     y_o.append(ONEDexample(x, noise=True)[1])
+    N=200
+    X_s = dist.Uniform(-10., 10.0).sample(sample_shape=(N,))
+    X_o = X_s.clone()
+    y_s = 0.5 * X_s + 25 * X_s / (1 + X_s ** 2) + dist.Normal(0.0, 0.2).sample(sample_shape=(N,))
+    y_o = 5 * torch.sin(2 * X_s) + dist.Normal(0.0, 0.01).sample(sample_shape=(N,))
+
+
+    X_s = torch.tensor(X_s, dtype=torch.float32).unsqueeze(-1)
+    y_s = torch.tensor(y_s, dtype=torch.float32).unsqueeze(-1)
+    X_o = torch.tensor(X_o, dtype=torch.float32).unsqueeze(-1)
+    y_o = torch.tensor(y_o, dtype=torch.float32).unsqueeze(-1)
+
+    # print(X_o)
+    # print(y_o)
+
+    # plt.figure(0)
+    #
+    # # plt.subplot(211)
+    # plt.scatter(X_s.detach().numpy(), y_s.detach().numpy(), marker='o', color='b', label='true_state', s=10)
+    # plt.xlabel(r'$\mu_0$')
+    # plt.legend()
+    # #plt.show()
+    #
+    # # plt.subplot(212)
+    # plt.scatter(X_s.detach().numpy(), y_o.detach().numpy(), marker='*', color='r', label='observation', s=10)
+    # plt.xlabel(r'$\mu_0$')
+    # plt.legend()
+    #
+    # plt.show()
+    # print(X_s.size())
+    # print(y_s.size())
+    # print(X_o.size())
+    # print(y_o.size())
+
+    gp_adf_rtss = GP_ADF_RTSS(X_s, y_s, X_o, y_o, option='GP')
+    gps_losses, gpo_losses = gp_adf_rtss.fit_GP()
+
+    plt.subplot(211)
+    plt.plot(gps_losses[0])
+    plt.subplot(212)
+    plt.plot(gpo_losses[0])
+    plt.show()
+    # print(len(gp_adf_rtss.state_transition_model_list))
+    # print(len(gp_adf_rtss.observation_model_list))
+    #
+    # print(len(gp_adf_rtss.state_transition_model_list[-1].kernel.get_param("lengthscale")))
+    # print(len(gp_adf_rtss.observation_model_list[-1].kernel.get_param("lengthscale")))
+
+
+
+
+    # N = 200
+    # X = dist.Uniform(-10., 10.0).sample(sample_shape=(N,))
+    # y = 5 * torch.sin(2 * X) + dist.Normal(0.0, 0.01).sample(sample_shape=(N,))
+    #
+    # #plot(plot_observed_data=True)  # let's
+    #
+
+    def plot(X, y, plot_observed_data=False, plot_predictions=False, n_prior_samples=0,
+             model=None, kernel=None, n_test=500):
+
+        plt.figure(figsize=(12, 6))
+        if plot_observed_data:
+            plt.plot(X.numpy(), y.numpy(), 'kx')
+        if plot_predictions:
+            Xtest = torch.linspace(-10, 10.0, n_test)  # test inputs
+            # compute predictive mean and variance
+            with torch.no_grad():
+                if type(model) == VariationalSparseGP:
+                    mean, cov = model(Xtest, full_cov=True)
+                else:
+                    mean, cov = model(Xtest.unsqueeze(-1), full_cov=True, noiseless=False)
+            sd = cov.diag().sqrt()  # standard deviation at each input point x
+            plt.plot(Xtest.numpy(), mean.numpy(), 'r', lw=2)  # plot the mean
+            plt.fill_between(Xtest.numpy(),  # plot the two-sigma uncertainty about the mean
+                             (mean - 2.0 * sd).numpy(),
+                             (mean + 2.0 * sd).numpy(),
+                             color='C0', alpha=0.3)
+        if n_prior_samples > 0:  # plot samples from the GP prior
+            Xtest = torch.linspace(-10.0, 10.0, n_test) # test inputs
+            noise = (model.noise if type(model) != VariationalSparseGP
+                     else model.likelihood.variance)
+            cov = kernel.forward(Xtest.unsqueeze(-1)) + noise.expand(n_test).diag()
+            samples = dist.MultivariateNormal(torch.zeros(n_test), covariance_matrix=cov) \
+                .sample(sample_shape=(n_prior_samples,))
+            plt.plot(Xtest.numpy(), samples.numpy().T, lw=2, alpha=0.4)
+
+        plt.xlim(-10.0, 10.0)
+        plt.show()
+
+
+    # kernel = RBF(input_dim=1,  lengthscale=torch.tensor(10.), variance=torch.tensor(5.))
+    # gpr = GPRegression(X_o[:, 0], y_o[:, 0], kernel, noise=torch.tensor(1.))
+    #
+    # optim = Adam({"lr": 0.005})
+    # svi = SVI(gpr.model, gpr.guide, optim, loss=Trace_ELBO())
+    # losses = []
+    # num_steps = 2500
+    # for i in range(num_steps):
+    #     losses.append(svi.step())
+    # plt.plot(losses)
+    # plt.show()
+    # # #
+    ssmodel = gp_adf_rtss.state_transition_model_list[-1]
+    obmodel = gp_adf_rtss.observation_model_list[-1]
+    plot(ssmodel.X[:, 0], ssmodel.y, model=ssmodel, plot_observed_data=True, plot_predictions=True)
+    plot(obmodel.X[:, 0], ssmodel.y, model=obmodel, plot_observed_data=True, plot_predictions=True)
+    # #
+
+
+
+
+
+
+
+
 
 
 
