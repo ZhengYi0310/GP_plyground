@@ -113,25 +113,27 @@ class GP_ADF_RTSS(Parameterized):
 
         self.sigma_Xpf_Xcd_lis     = []
 
+        self.Kff_s_inv = torch.zeros((y_s.size()[1], X_s.size()[0], X_s.size()[0]))
+        self.Kff_o_inv = torch.zeros((y_o.size()[1], X_o.size()[0], X_o.size()[0]))
+        self.K_s_var = torch.zeros(y_s.size()[1])
+        self.K_o_var = torch.zeros(y_o.size()[1])
+        self.Beta_s = torch.zeros((y_s.size()[1], X_s.size()[0]))
+        self.Beta_o = torch.zeros((y_s.size()[1], X_s.size()[0]))
+        self.lengthscale_s = torch.zeros((y_s.size()[1], X_s.size()[0]))
+        self.lengthscale_o = torch.zeros((y_o.size()[1], X_o.size()[0]))
+
+        if self.option == 'SSGP':
+            self.Xu_s = torch.zeros((y_s.size()[1], inducing_size))
+            self.Xu_o = torch.zeros((y_o.size()[1], inducing_size))
+            self.noise_s = torch.zeros((y_s.size()[1], inducing_size))
+            self.noise_o = torch.zeros((y_o.size()[1], inducing_size))
+
         print("for state transition model, input dim {} and output dim {}".format(X_s.size()[1], y_s.size()[1]))
         print("for observation model, input dim {} and output dim {}".format(X_o.size()[1], y_o.size()[1]))
 
     def fit_GP(self):
         ### train every GPf and GPo, cache necessary variables for further filtering
-        self.Kff_s_inv = []
-        self.Kff_o_inv = []
-        self.K_s_var = []
-        self.K_o_var = []
-        self.Beta_s = []
-        self.Beta_o = []
-        self.lengthscale_s = []
-        self.lengthscale_o = []
 
-        if self.option == 'SSGP':
-            self.Xu_s = []
-            self.Xu_o = []
-            self.noise_s = []
-            self.noise_o = []
 
         self.GPs_losses = []
         self.GPo_losses = []
@@ -143,38 +145,6 @@ class GP_ADF_RTSS(Parameterized):
             self.GPs_losses.append(losses)
             print("training for state transition model {} is done!".format(i))
 
-            if self.option == 'GP':
-                Kff = GPs.kernel(self.X_s).contiguous()
-                Kff.view(-1)[::self.X_s.size()[0] + 1] += GPs.get_param('noise')
-
-                Lff=  Kff.potrf(upper=False)
-                self.Kff_s_inv.append(torch.potrs(torch.eye(self.X_s.size()[0]), Lff, upper=False))
-                self.Beta_s.append(torch.potrs(self.y_s[:, i], Lff, upper=False))
-                self.K_s_var.append(GPs.kernel.get_param("variance"))
-                self.lengthscale_s.append(GPs.kernel.get_param("lengthscale"))
-
-            else:
-                Xu, noise = GPs.guide()
-                if (GPs.approx == 'DTC' or GPs.option == 'VFE'):
-                    Kff_inv, Beta = self._compute_cached_var_ssgp(GPs, Xu, noise, "DTC")
-
-                    self.Beta_s.append(Beta)
-                    self.Kff_s_inv.append(Kff_inv)
-                    self.K_s_var.append(GPs.kernel.get_param("variance"))
-                    self.lengthscale_s.append(GPs.kernel.get_param("lengthscale"))
-                    self.Xu_s.append(Xu)
-                    self.noise_s.append(noise)
-
-                else:
-                    Kff_inv, Beta = self._compute_cached_var_ssgp(GPs, Xu, noise, "FITC")
-
-                    self.Beta_s.append(Beta)
-                    self.Kff_s_inv.append(Kff_inv)
-                    self.K_s_var.append(GPs.kernel.get_param("variance"))
-                    self.lengthscale_s.append(GPs.kernel.get_param("lengthscale"))
-                    self.Xu_s.append(Xu)
-                    self.noise_s.append(noise)
-            print("variable caching for state transitino model {} is done!".format(i))
 
 
         for (i ,GPo) in enumerate(self.observation_model_list):
@@ -182,52 +152,89 @@ class GP_ADF_RTSS(Parameterized):
             self.GPo_losses.append(losses)
             print("training for observation model {} is done!".format(i))
 
-            if self.option== 'GP':
-                Kff = GPo.kernel(self.X_o).contiguous()
-                Kff.view(-1)[::self.X_o.size()[0] + 1] += GPo.get_param('noise')
-                Lff = Kff.potrf(upper=False)
-                self.Kff_o_inv.append(torch.potrs(torch.eye(self.X_o.size()[0]), Lff, upper=False))
-                self.Beta_o.append(torch.potrs(self.y_o[:, i], Lff, upper=False))
-                self.K_o_var.append(GPo.kernel.get_param("variance"))
-                self.lengthscale_o.append(GPo.kernel.get_param("lengthscale"))
-
-            else:
-                Xu, noise = GPo.guide()
-                if (GPo.approx == 'DTC' or GPo.option == 'VFE'):
-                    Xu, noise = GPo.guide()
-
-                    Kff_inv, Beta = self._compute_cached_var_ssgp(GPo, Xu, noise, "DTC")
-
-                    self.Beta_o.append(Beta)
-                    self.Kff_o_inv.append(Kff_inv)
-                    self.K_o_var.append(GPo.kernel.get_param("variance"))
-                    self.lengthscale_o.append(GPo.kernel.get_param("lengthscale"))
-                    self.Xu_o.append(Xu)
-                    self.noise_o.append(noise)
-
-                else:
-                    Kff_inv, Beta = self._compute_cached_var_ssgp(GPo, Xu, noise, "FITC")
-
-                    self.Beta_o.append(Beta)
-                    self.Kff_o_inv.append(Kff_inv)
-                    self.K_o_var.append(GPo.kernel.get_param("variance"))
-                    self.lengthscale_o.append(GPo.kernel.get_param("lengthscale"))
-                    self.Xu_o.append(Xu)
-                    self.noise_o.append(noise)
-            print("variable caching for observation model {} is done!".format(i))
-
-        self.zip_cached_s = list(zip(self.Beta_s, self.lengthscale_s, self.K_s_var, self.Kff_s_inv))
-        self.zip_cached_o = list(zip(self.Beta_o, self.lengthscale_o, self.K_o_var, self.Kff_o_inv))
+        self.cache_variable()
 
         # save the mode
         self._save_model()
         return self.GPs_losses, self.GPo_losses
 
-    def _save_model(self):
+    def save_model(self):
         pyro.get_param_store().save('gp_adf_rtss.save')
-    def _load_model(self):
-        pass
-    
+
+    def load_model(self):
+        pyro.get_param_store().load('gp_adf_rtss.save')
+        self.cache_variable()
+
+    def cache_variable(self):
+
+        for (i, GPs) in enumerate(self.state_transition_model_list):
+            if self.option == 'GP':
+                Kff = GPs.kernel(self.X_s).contiguous()
+                Kff.view(-1)[::self.X_s.size()[0] + 1] += GPs.get_param('noise')
+
+                Lff=  Kff.potrf(upper=False)
+                self.Kff_s_inv[i, :, :] = torch.potrs(torch.eye(self.X_s.size()[0]), Lff, upper=False)
+                self.Beta_s[i, :] = torch.potrs(self.y_s[:, i], Lff, upper=False).squeeze(-1)
+                self.K_s_var[i] = GPs.kernel.get_param("variance")
+                self.lengthscale_s[i, :] = GPs.kernel.get_param("lengthscale")
+
+            else:
+                Xu, noise = GPs.guide()
+                if (GPs.approx == 'DTC' or GPs.option == 'VFE'):
+                    Kff_inv, Beta = self._compute_cached_var_ssgp(GPs, Xu, noise, "DTC")
+                else:
+                    Kff_inv, Beta = self._compute_cached_var_ssgp(GPs, Xu, noise, "FITC")
+
+                self.Beta_s[i, :] = Beta
+                self.Kff_s_inv[i, :, :] = Kff_inv
+                self.K_s_var[i] = GPs.kernel.get_param("variance")
+                self.lengthscale_s[i, :] = GPs.kernel.get_param("lengthscale")
+                self.Xu_s[i, :] = Xu
+                self.noise_s[i, :, :] = noise
+
+        print("variable caching for state transitino model {} is done!".format(i))
+
+        for (i, GPo) in enumerate(self.observation_model_list):
+            if self.option== 'GP':
+                Kff = GPo.kernel(self.X_o).contiguous()
+                Kff.view(-1)[::self.X_o.size()[0] + 1] += GPo.get_param('noise')
+                Lff = Kff.potrf(upper=False)
+                self.Kff_o_inv[i, :, :] = torch.potrs(torch.eye(self.X_o.size()[0]), Lff, upper=False)
+                self.Beta_o[i, :] = torch.potrs(self.y_o[:, i], Lff, upper=False).squeeze(-1)
+                self.K_o_var[i] = GPo.kernel.get_param("variance")
+                self.lengthscale_o[i, :] = GPo.kernel.get_param("lengthscale")
+
+            else:
+                Xu, noise = GPo.guide()
+                if (GPo.approx == 'DTC' or GPo.option == 'VFE'):
+                    Xu, noise = GPo.guide()
+                    Kff_inv, Beta = self._compute_cached_var_ssgp(GPo, Xu, noise, "DTC")
+                else:
+                    Kff_inv, Beta = self._compute_cached_var_ssgp(GPo, Xu, noise, "FITC")
+
+                self.Beta_o[i, :] = Beta
+                self.Kff_o_inv[i, :, :] = Kff_inv
+                self.K_o_var[i] = GPo.kernel.get_param("variance")
+                self.lengthscale_o[i, :] = GPo.kernel.get_param("lengthscale")
+                self.Xu_o[i, :] = Xu
+                self.noise_o[i, :, :] = noise
+            print("variable caching for observation model {} is done!".format(i))
+
+            # self.zip_cached_s = list(zip(self.Beta_s, self.lengthscale_s, self.K_s_var, self.Kff_s_inv))
+            # self.zip_cached_o = list(zip(self.Beta_o, self.lengthscale_o, self.K_o_var, self.Kff_o_inv))
+            print(self.Beta_s.size())
+            print(self.Beta_o.size())
+            print(self.lengthscale_s.size())
+            print(self.lengthscale_o.size())
+            print(self.Kff_s_inv.size())
+            print(self.Kff_o_inv.size())
+            print(self.K_s_var.size())
+            print(self.K_o_var.size())
+          
+
+
+
+
     def _compute_cached_var_ssgp(self, model, Xu, noise, option):
 
 
@@ -284,6 +291,7 @@ class GP_ADF_RTSS(Parameterized):
         :return:
         """
         ### porediction of gp mean for uncertain inputs
+
         assert(input.size()[1] == mean.size()[1])
 
         # eq 9 of ref. [1]
@@ -315,6 +323,8 @@ class GP_ADF_RTSS(Parameterized):
         :return:
         """
         assert (input.size()[1] == mean.size()[1])
+
+
 
         # eq 11 of ref.[1]
         with torch.no_grad():
@@ -386,7 +396,7 @@ class GP_ADF_RTSS(Parameterized):
             cov = torch.matmul(Beta_a, torch.matmul(L, Beta_b)) - mu_a * mu_b
             return cov
 
-    def _prediction(self, input, zip_cached, mean, covariance):
+    def _prediction(self, input, Beta, lengthscale, var, Kff_inv, mean, covariance):
         """
         prediction from p(x(k-1) | y(1:k-1) to p(x(k) | y(1:k-1)), p(x(k-1) | y(1:k-1)) is the filtered result of the last step
             OR
@@ -395,23 +405,26 @@ class GP_ADF_RTSS(Parameterized):
         :param covariance: covariance matrix for p(x(k-1) | y(1:k-1)
         :return:
         """
-        pred_mean = list(map(lambda x : self.mean_propagation(input, x[0], x[1], x[2], mean, covariance), zip_cached))
-        pred_mean_tensor = torch.tensor(pred_mean)
+        #pred_mean = list(map(lambda x : self.mean_propagation(input, x[0], x[1], x[2], mean, covariance), zip_cached))
+        pred_mean = self.mean_propagation(input, Beta, lengthscale, var, mean, covariance)
+       # pred_mean_tensor = torch.tensor(pred_mean)
 
-        zip_cached_pred = list(zip(zip_cached, pred_mean))
-        pred_cov_diag = list(map(lambda x : self.variance_propagation(input, x[0], x[1], x[2], x[3], x[4], mean, covariance), zip_cached_pred))
+        # zip_cached_pred = list(zip(zip_cached, pred_mean))
+        #pred_cov_diag = list(map(lambda x : self.variance_propagation(input, x[0], x[1], x[2], x[3], pred_mean_tensor, mean, covariance), zip_cached))
+        pred_cov_diag = self.variance_propagation(input, Beta, lengthscale, var, Kff_inv, pred_mean, mean, covariance),
+        # pred_cov_diag = torch.tensor(pred_cov_diag)
+        pred_cov_diag = pred_cov_diag / 2.
 
-        pred_covariance_tensor = pred_cov_diag / 2.
-
-        range_lis = [(i ,j) for i in range(0, len(zip_cached)) for j in range(i, len(zip_cached))]
-        list_cov = list(map(lambda tup : self.covariance_propagation(input, zip_cached_pred[0][tup[0]], zip_cached_pred[1][tup[0]], zip_cached_pred[2][tup[0]], zip_cached_pred[4][tup[0]],
-                                                                            zip_cached_pred[0][tup[1]], zip_cached_pred[1][tup[1]], zip_cached_pred[2][tup[1]], zip_cached_pred[4][tup[1]],
-                                                                            mean, covariance), range_lis))
-        off_diag = torch.tensor(list_cov).view(pred_mean_tensor.size()[0], -1)
-        pred_covariance_tensor += off_diag
-        pred_covariance_tensor = pred_covariance_tensor + pred_covariance_tensor.transpose(dim0=0, dim1=1)
-
-        return pred_mean_tensor, pred_covariance_tensor
+        # range_lis = [(i ,j) for i in range(0, len(zip_cached)) for j in range(i, len(zip_cached))]
+        # print(len(zip_cached[1]))
+        # list_cov = list(map(lambda tup : self.covariance_propagation(input, zip_cached[0][tup[0]], zip_cached[1][tup[0]], zip_cached[2][tup[0]], pred_mean_tensor[tup[0]],
+        #                                                                     zip_cached[0][tup[1]], zip_cached[1][tup[1]], zip_cached[2][tup[1]], pred_mean_tensor[tup[1]],
+        #                                                                     mean, covariance), range_lis))
+        # off_diag = torch.tensor(list_cov).view(pred_mean_tensor.size()[0], -1)
+        # pred_covariance_tensor += off_diag
+        # pred_covariance_tensor = pred_covariance_tensor + pred_covariance_tensor.transpose(dim0=0, dim1=1)
+        #
+        return pred_mean, pred_cov_diag
 
     def step(self):
         """
@@ -421,11 +434,14 @@ class GP_ADF_RTSS(Parameterized):
         self.mu_hat_s_prev = self.mu_hat_s_curr.clone()
         self.sigma_hat_s_prev = self.sigma_hat_s_curr.clone()
 
-    def prediction(self, mu_hat_s_prev, sigma_hat_s_prev, index):
+    def prediction(self, mu_hat_s_prev, sigma_hat_s_prev, index=None):
+
+        assert(mu_hat_s_prev.dim() == 2),"filtered mean of previous step needs to have dim 2, has {} instead.".format(mu_hat_s_prev.dim())
+        assert (sigma_hat_s_prev.dim() == 2), "filtered covariance of previous step needs to have dim 2, has {} instead.".format(sigma_hat_s_prev.dim())
 
         #mean_predicted_s_curr, covariance_predicted_s_curr = self._prediction(self.X_s, self.zip_cached_s, mu_hat_s_prev, sigma_hat_s_prev)
         if self.option == "GP":
-            mu_s_curr, sigma_s_curr = self._prediction(self.X_s, self.zip_cached_s, mu_hat_s_prev, sigma_hat_s_prev)
+            mu_s_curr, sigma_s_curr = self._prediction(self.X_s, self.Beta_s, self.lengthscale_s, self.K_s_var, self.Kff_s_inv, mu_hat_s_prev, sigma_hat_s_prev)
             sigma_Xcd_Xpf, sigma_Xpf_Xcd = self._compute_cov(self.X_s, mu_hat_s_prev, self.mu_s_curr,
                                                              self.lengthscale_s, sigma_hat_s_prev, self.K_s_var,
                                                              self.Beta_s)
@@ -445,7 +461,7 @@ class GP_ADF_RTSS(Parameterized):
 
         return self.mu_s_curr, self.sigma_s_curr
 
-    def filtering(self, observation, mu_s_curr, sigma_s_curr, index):
+    def filtering(self, observation, mu_s_curr, sigma_s_curr, index=None):
         """
         filtering from p(x(k) | y(1:k-1)), updated using p(y(k) | x(k)), to get p(x(k) | y(1:k))
         :param mean_pred: mean of p(x(k) | y(1:k-1)),
@@ -648,28 +664,19 @@ if __name__ == '__main__':
     # print(y_o.size())
 
     gp_adf_rtss = GP_ADF_RTSS(X_s, y_s, X_o, y_o, option='GP')
-    gps_losses, gpo_losses = gp_adf_rtss.fit_GP()
+    #gps_losses, gpo_losses = gp_adf_rtss.fit_GP()
 
-    plt.subplot(211)
-    plt.plot(gps_losses[0])
-    plt.subplot(212)
-    plt.plot(gpo_losses[0])
-    plt.show()
+    # plt.subplot(211)
+    # plt.plot(gps_losses[0])
+    # plt.subplot(212)
+    # plt.plot(gpo_losses[0])
+    # plt.show()
     # print(len(gp_adf_rtss.state_transition_model_list))
     # print(len(gp_adf_rtss.observation_model_list))
     #
     # print(len(gp_adf_rtss.state_transition_model_list[-1].kernel.get_param("lengthscale")))
     # print(len(gp_adf_rtss.observation_model_list[-1].kernel.get_param("lengthscale")))
 
-
-
-
-    # N = 200
-    # X = dist.Uniform(-10., 10.0).sample(sample_shape=(N,))
-    # y = 5 * torch.sin(2 * X) + dist.Normal(0.0, 0.01).sample(sample_shape=(N,))
-    #
-    # #plot(plot_observed_data=True)  # let's
-    #
 
     def plot(X, y, plot_observed_data=False, plot_predictions=False, n_prior_samples=0,
              model=None, kernel=None, n_test=500):
@@ -716,12 +723,28 @@ if __name__ == '__main__':
     # plt.plot(losses)
     # plt.show()
     # # #
+
+    gp_adf_rtss.load_model()
     ssmodel = gp_adf_rtss.state_transition_model_list[-1]
     obmodel = gp_adf_rtss.observation_model_list[-1]
     plot(ssmodel.X[:, 0], ssmodel.y, model=ssmodel, plot_observed_data=True, plot_predictions=True)
     plot(obmodel.X[:, 0], ssmodel.y, model=obmodel, plot_observed_data=True, plot_predictions=True)
-    # #
 
+    # # Draw the 200 independant pairs
+    # N = 500
+    # X = dist.Normal(-10., 10.0).sample(sample_shape=(N,))
+    # sigma = torch.tensor(0.25)
+    # X_next =  0.5 * X + 25 * X / (1 + X ** 2) + dist.Normal(0.0, 0.2).sample(sample_shape=(N,))
+    # y_observe =  5 * torch.sin(2 * X_next) + dist.Normal(0.0, 0.01).sample(sample_shape=(N,))
+    #
+    # zipped_input = list(zip(X, y_observe))
+    #
+    # for (X, y_observe) in zipped_input:
+    #     _, _ = gp_adf_rtss.prediction(X.unsqueeze(-1).unsqueeze(-1), sigma.unsqueeze(-1).unsqueeze(-1))
+    #
+    # #
+    # #plot(plot_observed_data=True)  # let's
+    #
 
 
 
