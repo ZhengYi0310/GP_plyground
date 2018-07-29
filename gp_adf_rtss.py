@@ -27,7 +27,7 @@ class GP_ADF_RTSS(Parameterized):
         [3] Robust Filtering and Smoothing with Gaussian Processes
     """
 
-    def __init__(self, X_s, y_s, X_o, y_o, option='SSGP', inducing_size=100, name='GP_ADF_RTSS'):
+    def __init__(self, X_s, y_s, X_o, y_o, option='GP', inducing_size=100, name='GP_ADF_RTSS'):
         """
         :param X_s: training inputs for the state transition model N by D tensor
         :param y_s: training outputs for the state transition model N by E tensor
@@ -61,39 +61,49 @@ class GP_ADF_RTSS(Parameterized):
         # choose the model type and initialize based on the option
         self.state_transition_model_list  = []
         self.observation_model_list = []
+
+
         if option == 'SSGP':
-            for i in range(self.y_s.size()[1]):
-                kernel = RBF(input_dim=self.X_s.size()[1], lengthscale=torch.ones(self.X_s.size()[1]) * 10., variance=torch.tensor(5.0),name="GPs_dim" + str(i) + "_RBF")
+                for i in range(self.y_s.size()[1]):
+                    kernel = RBF(input_dim=self.X_s.size()[1], lengthscale=torch.ones(self.X_s.size()[1]) * 10., variance=torch.tensor(5.0),name="GPs_dim" + str(i) + "_RBF")
 
-                range_lis = range(0, X_s.size()[0])
-                random.shuffle(range_lis)
-                Xu = X_s[range_lis[0:inducing_size], :]
+                    range_lis = range(0, X_s.size()[0])
+                    random.shuffle(range_lis)
+                    Xu = X_s[range_lis[0:inducing_size], :]
 
-                # need to set the name for different model, otherwise pyro will clear the parameter storage
-                ssgpmodel = SparseGPRegression(X_s, y_s[:, i], kernel, Xu, name="SSGPs_model_dim" + str(i), jitter=1e-5)
-                self.state_transition_model_list.append(ssgpmodel)
+                    # need to set the name for different model, otherwise pyro will clear the parameter storage
+                    ssgpmodel = SparseGPRegression(X_s, y_s[:, i], kernel, Xu, name="SSGPs_model_dim" + str(i), jitter=1e-5)
+                    self.state_transition_model_list.append(ssgpmodel)
 
-            for i in range(self.y_o.size()[1]):
-                kernel = RBF(input_dim=self.X_o.size()[1], lengthscale=torch.ones(self.X_o.size()[1]) * 10, variance=torch.tensor(5.0), name="GPo_dim" + str(i) + "_RBF")
+                for i in range(self.y_o.size()[1]):
+                    kernel = RBF(input_dim=self.X_o.size()[1], lengthscale=torch.ones(self.X_o.size()[1]) * 10, variance=torch.tensor(5.0), name="GPo_dim" + str(i) + "_RBF")
 
-                range_lis = range(0, y_o.size()[0])
-                random.shuffle(range_lis)
-                Xu = X_o[range_lis[0:inducing_size], :]
+                    range_lis = range(0, y_o.size()[0])
+                    random.shuffle(range_lis)
+                    Xu = X_o[range_lis[0:inducing_size], :]
 
-                ssgpmodel = SparseGPRegression(X_o, y_o[:, i], kernel, Xu, name="SSGPo_model_dim" + str(i), noise=torch.tensor(2.))
-                self.state_transition_model_list.append(ssgpmodel)
+                    ssgpmodel = SparseGPRegression(X_o, y_o[:, i], kernel, Xu, name="SSGPo_model_dim" + str(i), noise=torch.tensor(2.))
+                    self.state_transition_model_list.append(ssgpmodel)
 
         else:
-            for i in range(self.y_s.size()[1]):
-                kernel = RBF(input_dim=self.X_s.size()[1], lengthscale=torch.ones(self.X_s.size()[1]) * 10., variance=torch.tensor(5.0), name="GPs_dim" + str(i) + "_RBF")
-                gpmodel = GPRegression(X_s, y_s[:, i], kernel, name="GPs_model_dim" + str(i), jitter=1e-5)
-                self.state_transition_model_list.append(gpmodel)
+                for i in range(self.y_s.size()[1]):
+                    kernel = RBF(input_dim=self.X_s.size()[1], lengthscale=torch.ones(self.X_s.size()[1]) * 10., variance=torch.tensor(5.0), name="GPs_dim" + str(i) + "_RBF")
+                    gpmodel = GPRegression(X_s, y_s[:, i], kernel, name="GPs_model_dim" + str(i), jitter=1e-5)
+                    self.state_transition_model_list.append(gpmodel)
 
-            for i in range(self.y_o.size()[1]):
-                kernel = RBF(input_dim=self.X_o.size()[1], lengthscale=torch.ones(self.X_o.size()[1]) * 10., variance=torch.tensor(5.0), name="GPo_dim" + str(i) + "_RBF")
-                gpmodel = GPRegression(X_o, y_o[:, i], kernel, name="GPo_model_dim"+ str(i), noise=torch.tensor(2.))
-                self.observation_model_list.append(gpmodel)
+                for i in range(self.y_o.size()[1]):
+                    kernel = RBF(input_dim=self.X_o.size()[1], lengthscale=torch.ones(self.X_o.size()[1]) * 10., variance=torch.tensor(5.0), name="GPo_dim" + str(i) + "_RBF")
+                    gpmodel = GPRegression(X_o, y_o[:, i], kernel, name="GPo_model_dim"+ str(i), noise=torch.tensor(2.))
+                    self.observation_model_list.append(gpmodel)
+
         self.option = option
+        #
+        # if model_file:
+        #     self.load_model(model_file)
+
+
+
+
 
         self.mu_s_curr      = torch.zeros(y_s.size()[1])
         self.sigma_s_curr   = torch.eye(y_s.size()[1])
@@ -115,12 +125,12 @@ class GP_ADF_RTSS(Parameterized):
 
         self.Kff_s_inv = torch.zeros((y_s.size()[1], X_s.size()[0], X_s.size()[0]))
         self.Kff_o_inv = torch.zeros((y_o.size()[1], X_o.size()[0], X_o.size()[0]))
-        self.K_s_var = torch.zeros(y_s.size()[1])
-        self.K_o_var = torch.zeros(y_o.size()[1])
+        self.K_s_var = torch.zeros(y_s.size()[1], 1)
+        self.K_o_var = torch.zeros(y_o.size()[1], 1)
         self.Beta_s = torch.zeros((y_s.size()[1], X_s.size()[0]))
         self.Beta_o = torch.zeros((y_s.size()[1], X_s.size()[0]))
-        self.lengthscale_s = torch.zeros((y_s.size()[1], X_s.size()[0]))
-        self.lengthscale_o = torch.zeros((y_o.size()[1], X_o.size()[0]))
+        self.lengthscale_s = torch.zeros((y_s.size()[1], X_s.size()[1]))
+        self.lengthscale_o = torch.zeros((y_o.size()[1], X_o.size()[1]))
 
         if self.option == 'SSGP':
             self.Xu_s = torch.zeros((y_s.size()[1], inducing_size))
@@ -161,22 +171,24 @@ class GP_ADF_RTSS(Parameterized):
     def save_model(self):
         pyro.get_param_store().save('gp_adf_rtss.save')
 
-    def load_model(self):
-        pyro.get_param_store().load('gp_adf_rtss.save')
-        self.cache_variable()
+    def load_model(self, filename):
+        pyro.get_param_store().load(filename)
+        #Beta = self.cache_variable()
 
     def cache_variable(self):
-
+        #Beta = None
         for (i, GPs) in enumerate(self.state_transition_model_list):
             if self.option == 'GP':
+                GPs.guide()
                 Kff = GPs.kernel(self.X_s).contiguous()
                 Kff.view(-1)[::self.X_s.size()[0] + 1] += GPs.get_param('noise')
-
                 Lff=  Kff.potrf(upper=False)
                 self.Kff_s_inv[i, :, :] = torch.potrs(torch.eye(self.X_s.size()[0]), Lff, upper=False)
                 self.Beta_s[i, :] = torch.potrs(self.y_s[:, i], Lff, upper=False).squeeze(-1)
                 self.K_s_var[i] = GPs.kernel.get_param("variance")
                 self.lengthscale_s[i, :] = GPs.kernel.get_param("lengthscale")
+
+
 
             else:
                 Xu, noise = GPs.guide()
@@ -196,6 +208,7 @@ class GP_ADF_RTSS(Parameterized):
 
         for (i, GPo) in enumerate(self.observation_model_list):
             if self.option== 'GP':
+                GPo.guide()
                 Kff = GPo.kernel(self.X_o).contiguous()
                 Kff.view(-1)[::self.X_o.size()[0] + 1] += GPo.get_param('noise')
                 Lff = Kff.potrf(upper=False)
@@ -230,10 +243,8 @@ class GP_ADF_RTSS(Parameterized):
             print(self.Kff_o_inv.size())
             print(self.K_s_var.size())
             print(self.K_o_var.size())
-          
 
-
-
+            print("initialization is done!")
 
     def _compute_cached_var_ssgp(self, model, Xu, noise, option):
 
@@ -278,7 +289,7 @@ class GP_ADF_RTSS(Parameterized):
 
 
 
-    def mean_propagation(self, input, Beta, lenthscale, variance, mean, covariance):
+    def mean_propagation(self, input, Beta, lengthscale, variance, mean, covariance):
         """
         mean of the prpagation of GP for uncertain inputs
         :param input: traing inputs N by D or N by E
@@ -291,22 +302,30 @@ class GP_ADF_RTSS(Parameterized):
         :return:
         """
         ### porediction of gp mean for uncertain inputs
+        # print(input.size())
+        # print(Beta.size())
+        # print(lengthscale.size())
+        # print(variance.size())
+        # print(mean.size())
+        # print(covariance.size())
 
         assert(input.size()[1] == mean.size()[1])
 
         # eq 9 of ref. [1]
         with torch.no_grad():
 
-            mat1 = (lenthscale.diag() + covariance)
-            det = variance * (torch.det(mat1) ** -0.5) * (torch.det(lenthscale.diag()) ** 0.5)
+            mat1 = (lengthscale.diag() + covariance)
+
+            det = variance * (torch.det(mat1) ** -0.5) * (torch.det(lengthscale.diag()) ** 0.5)
             diff = input - mean
             # N x 1 x D @ D x D @ N x D x 1 = N x 1 x 1(or D replaced by E) TODO MAYBE CONSIDER ADD SOME JITTER ?
             mat2 = mat1.potrf(upper=False)
             mat3 = torch.potrs(torch.eye(mat1.size()[0]), mat2, upper=False)
             mat4 = (torch.matmul(diff.unsqueeze(1), torch.matmul(mat3, diff.unsqueeze(-1)))) * -0.5
             # (N, )
-            l = det * torch.exp(-0.5 * mat4.view(-1))
+            l = det * torch.exp(mat4.view(-1))
             mu = torch.matmul(Beta, l)
+
             return mu
 
     def variance_propagation(self, input, Beta, lengthscale, variance, Kff_inv, mu, mean, covariance):
@@ -339,15 +358,18 @@ class GP_ADF_RTSS(Parameterized):
 
             # elementwise computation
             # N by N
+
             mat4 = ((diff_m ** 2 / lengthscale * 2).sum(dim=-1)) * -0.5
+
             # N x N x 1 x D @ D x D @ N x N x D x 1 = N x N x 1 x 1(or D replaced by E) TODO MAYBE CONSIDER ADD SOME JITTER ?
             mat5 = sum_m - mean
-            mat6 = (torch.matmul(mat5.unsqueeze(2), torch.matmul(mat3, mat5.unsqueeze(-1)))) * -0.5
 
+            # print(mat3.size(), mat5.size())
+            mat6 = (torch.matmul(mat5.unsqueeze(2), torch.matmul(mat3, mat5.unsqueeze(-1)))) * -0.5
             # N by N
             L = variance**2 * det* torch.mul(torch.exp(mat4), torch.exp(mat6.view(input.size()[0], input.size()[0])))
-            var = torch.matmul(Beta, torch.matmul(L, Beta)) + variance - torch.trace(torch.matmul(Kff_inv, L)) - mu
-            return var
+            var = torch.matmul(Beta, torch.matmul(L, Beta)) + variance - torch.trace(torch.matmul(Kff_inv, L)) - mu * mu
+            return var.diag()
 
     def covariance_propagation(self, input, Beta_a, lengthscale_a, variance_a, mu_a,
                                             Beta_b, lengthscale_b, variance_b, mu_b,
@@ -405,26 +427,30 @@ class GP_ADF_RTSS(Parameterized):
         :param covariance: covariance matrix for p(x(k-1) | y(1:k-1)
         :return:
         """
-        #pred_mean = list(map(lambda x : self.mean_propagation(input, x[0], x[1], x[2], mean, covariance), zip_cached))
-        pred_mean = self.mean_propagation(input, Beta, lengthscale, var, mean, covariance)
-       # pred_mean_tensor = torch.tensor(pred_mean)
+        range_lis = [i for i in range(Beta.size()[0])]
+        pred_mean_tensor = torch.tensor(list(map(lambda i : self.mean_propagation(input, Beta[i, :], lengthscale[i, :], var[i, :], mean, covariance), range_lis)))
+        pred_cov_diag = torch.tensor(list(map(lambda i : self.variance_propagation(input, Beta[i, :], lengthscale[i, :], var[i, :], Kff_inv[i, :, :],
+                                                                                   pred_mean_tensor, mean, covariance), range_lis)))
 
-        # zip_cached_pred = list(zip(zip_cached, pred_mean))
-        #pred_cov_diag = list(map(lambda x : self.variance_propagation(input, x[0], x[1], x[2], x[3], pred_mean_tensor, mean, covariance), zip_cached))
-        pred_cov_diag = self.variance_propagation(input, Beta, lengthscale, var, Kff_inv, pred_mean, mean, covariance),
-        # pred_cov_diag = torch.tensor(pred_cov_diag)
+
         pred_cov_diag = pred_cov_diag / 2.
+        #pred_cov_diag = torch.eye(1)
+        if Beta.size()[0] > 1:
+            range_lis = [(i ,j) for i in range(0, Beta.size()[0]) for j in range(i, Beta.size()[0])]
+            list_cov = list(map(lambda tup : self.covariance_propagation(input, Beta[tup[0], :], lengthscale[tup[0], :], var[tup[0], :], pred_mean_tensor[tup[0]],
+                                                                                Beta[tup[1], :], lengthscale[tup[1], :], var[tup[1], :], pred_mean_tensor[tup[1]],
+                                                                                mean, covariance), range_lis))
 
-        # range_lis = [(i ,j) for i in range(0, len(zip_cached)) for j in range(i, len(zip_cached))]
-        # print(len(zip_cached[1]))
-        # list_cov = list(map(lambda tup : self.covariance_propagation(input, zip_cached[0][tup[0]], zip_cached[1][tup[0]], zip_cached[2][tup[0]], pred_mean_tensor[tup[0]],
-        #                                                                     zip_cached[0][tup[1]], zip_cached[1][tup[1]], zip_cached[2][tup[1]], pred_mean_tensor[tup[1]],
-        #                                                                     mean, covariance), range_lis))
-        # off_diag = torch.tensor(list_cov).view(pred_mean_tensor.size()[0], -1)
-        # pred_covariance_tensor += off_diag
+        pred_cov_diag = torch.tensor(list_cov).view(pred_mean_tensor.size()[0], -1)
+
+        pred_cov = torch.ones((Beta.size()[0], Beta.size()[0])) - torch.eye((Beta.size([0], Beta.size()[0])))
+        pred_cov[torch.triu(torch.ones(Beta.size()[0], Beta.size()[0])) == 1] = pred_cov
+        pred_cov = torch.mul(pred_cov, torch.eye((Beta.size()[0], Beta.size()[0]) * 0.5))
+
+        pred_cov = pred_cov + pred_cov.transpose(dim0=0, dim1=1)
         # pred_covariance_tensor = pred_covariance_tensor + pred_covariance_tensor.transpose(dim0=0, dim1=1)
         #
-        return pred_mean, pred_cov_diag
+        return pred_mean_tensor, pred_cov_diag
 
     def step(self):
         """
@@ -442,23 +468,23 @@ class GP_ADF_RTSS(Parameterized):
         #mean_predicted_s_curr, covariance_predicted_s_curr = self._prediction(self.X_s, self.zip_cached_s, mu_hat_s_prev, sigma_hat_s_prev)
         if self.option == "GP":
             mu_s_curr, sigma_s_curr = self._prediction(self.X_s, self.Beta_s, self.lengthscale_s, self.K_s_var, self.Kff_s_inv, mu_hat_s_prev, sigma_hat_s_prev)
-            sigma_Xcd_Xpf, sigma_Xpf_Xcd = self._compute_cov(self.X_s, mu_hat_s_prev, self.mu_s_curr,
-                                                             self.lengthscale_s, sigma_hat_s_prev, self.K_s_var,
-                                                             self.Beta_s)
+            #sigma_Xcd_Xpf, sigma_Xpf_Xcd = self._compute_cov(self.X_s, mu_hat_s_prev, self.mu_s_curr,
+            #                                                 self.lengthscale_s, sigma_hat_s_prev, self.K_s_var,
+            #                                                 self.Beta_s)
         else:
             assert(index != 0 and index <= len(self.Xu_s)), "state transition models have dimension {}, index is {}.".format(len(self.Xu_s), index)
             mu_s_curr, sigma_s_curr = self._prediction(self.Xu_s[index], self.zip_cached_s, mu_hat_s_prev, sigma_hat_s_prev)
-            sigma_Xcd_Xpf, sigma_Xpf_Xcd = self._compute_cov(self.Xu_s[index], mu_hat_s_prev, self.mu_s_curr,
-                                                             self.lengthscale_s, sigma_hat_s_prev, self.K_s_var,
-                                                             self.Beta_s)
-            
+        #     sigma_Xcd_Xpf, sigma_Xpf_Xcd = self._compute_cov(self.Xu_s[index], mu_hat_s_prev, self.mu_s_curr,
+        #                                                      self.lengthscale_s, sigma_hat_s_prev, self.K_s_var,
+        #                                                      self.Beta_s)
+        #
         self.mu_s_curr, self.sigma_s_curr = mu_s_curr, sigma_s_curr
         self.mu_s_curr_lis.append(self.mu_s_curr.clone())
-        self.sigma_curr_lis.append(self.sigma_s_curr.cone())
-
-        
-        self.sigma_Xpf_Xcd_lis.append(sigma_Xpf_Xcd .clone())
-
+        self.sigma_s_curr_lis.append(self.sigma_s_curr.clone())
+        #
+        #
+        # self.sigma_Xpf_Xcd_lis.append(sigma_Xpf_Xcd .clone())
+        #
         return self.mu_s_curr, self.sigma_s_curr
 
     def filtering(self, observation, mu_s_curr, sigma_s_curr, index=None):
@@ -596,6 +622,8 @@ if __name__ == '__main__':
     import random
 
     plt.style.use("seaborn")
+    pyro.set_rng_seed(0)
+
 
     def ONEDexample(x, noise = True):
         x_next = 0.5 * x + 25 * x / (1 + x ** 2)
@@ -662,8 +690,9 @@ if __name__ == '__main__':
     # print(y_s.size())
     # print(X_o.size())
     # print(y_o.size())
-
+    pyro.get_param_store().load('gp_adf_rtss.save')
     gp_adf_rtss = GP_ADF_RTSS(X_s, y_s, X_o, y_o, option='GP')
+    pyro.module('GP_ADF_RTSS', gp_adf_rtss, update_module_params=True)
     #gps_losses, gpo_losses = gp_adf_rtss.fit_GP()
 
     # plt.subplot(211)
@@ -724,28 +753,43 @@ if __name__ == '__main__':
     # plt.show()
     # # #
 
-    gp_adf_rtss.load_model()
+    #gp_adf_rtss.load_model()
+
     ssmodel = gp_adf_rtss.state_transition_model_list[-1]
     obmodel = gp_adf_rtss.observation_model_list[-1]
-    plot(ssmodel.X[:, 0], ssmodel.y, model=ssmodel, plot_observed_data=True, plot_predictions=True)
-    plot(obmodel.X[:, 0], ssmodel.y, model=obmodel, plot_observed_data=True, plot_predictions=True)
+    # plot(ssmodel.X[:, 0], ssmodel.y, model=ssmodel, plot_observed_data=True, plot_predictions=True)
+    # plot(obmodel.X[:, 0], obmodel.y, model=obmodel, plot_observed_data=True, plot_predictions=True)
 
-    # # Draw the 200 independant pairs
-    # N = 500
-    # X = dist.Normal(-10., 10.0).sample(sample_shape=(N,))
-    # sigma = torch.tensor(0.25)
-    # X_next =  0.5 * X + 25 * X / (1 + X ** 2) + dist.Normal(0.0, 0.2).sample(sample_shape=(N,))
-    # y_observe =  5 * torch.sin(2 * X_next) + dist.Normal(0.0, 0.01).sample(sample_shape=(N,))
-    #
-    # zipped_input = list(zip(X, y_observe))
-    #
-    # for (X, y_observe) in zipped_input:
-    #     _, _ = gp_adf_rtss.prediction(X.unsqueeze(-1).unsqueeze(-1), sigma.unsqueeze(-1).unsqueeze(-1))
+    # Draw the 200 independant pairs
+
+
+    N = 500
+    X = dist.Uniform(-10., 10.0).sample(sample_shape=(N,))
+    sigma = torch.tensor(0.25)
+    X_next =  0.5 * X + 25 * X / (1 + X ** 2) #+ dist.Normal(0.0, 0.2).sample(sample_shape=(N,))
+    y_observe =  5 * torch.sin(2 * X_next) + dist.Normal(0.0, 0.01).sample(sample_shape=(N,))
+
+    zipped_input = list(zip(X, y_observe))
+
+    gp_adf_rtss.cache_variable()
+    for (i, input) in enumerate(zipped_input):
+
+
+        mu_pred, sigma_pred = gp_adf_rtss.prediction(input[0].unsqueeze(-1).unsqueeze(-1), sigma.unsqueeze(-1).unsqueeze(-1))
+
+        print(X_next[i], mu_pred, sigma_pred)
+
+    # print(gp_adf_rtss.state_transition_model_list[0].kernel.get_param("lengthscale"), beta)
     #
     # #
     # #plot(plot_observed_data=True)  # let's
     #
 
+    # Kff = gp_adf_rtss.state_transition_model_list[0].kernel(gp_adf_rtss.state_transition_model_list[0].X).contiguous()
+    # Kff.view(-1)[::200 + 1] += gp_adf_rtss.state_transition_model_list[0].get_param('noise')  # add noise to the diagonal
+    # Lff = Kff.potrf(upper=False)
+    #
+    # print(Lff_s[0:3, 0:3], Lff[0:3, 0:3])
 
 
 
