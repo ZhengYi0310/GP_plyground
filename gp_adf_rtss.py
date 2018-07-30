@@ -128,7 +128,7 @@ class GP_ADF_RTSS(Parameterized):
         self.K_s_var = torch.zeros(y_s.size()[1], 1)
         self.K_o_var = torch.zeros(y_o.size()[1], 1)
         self.Beta_s = torch.zeros((y_s.size()[1], X_s.size()[0]))
-        self.Beta_o = torch.zeros((y_s.size()[1], X_s.size()[0]))
+        self.Beta_o = torch.zeros((y_o.size()[1], X_s.size()[0]))
         self.lengthscale_s = torch.zeros((y_s.size()[1], X_s.size()[1]))
         self.lengthscale_o = torch.zeros((y_o.size()[1], X_o.size()[1]))
 
@@ -369,7 +369,7 @@ class GP_ADF_RTSS(Parameterized):
             # N by N
             L = variance**2 * det* torch.mul(torch.exp(mat4), torch.exp(mat6.view(input.size()[0], input.size()[0])))
             var = torch.matmul(Beta, torch.matmul(L, Beta)) + variance - torch.trace(torch.matmul(Kff_inv, L)) - mu * mu
-            return var.diag()
+            return var
 
     def covariance_propagation(self, input, Beta_a, lengthscale_a, variance_a, mu_a,
                                             Beta_b, lengthscale_b, variance_b, mu_b,
@@ -398,7 +398,7 @@ class GP_ADF_RTSS(Parameterized):
 
             mat1 = 1 / (1 / lengthscale_a + 1 / lengthscale_b).diag()
             R = mat1 + covariance
-            det = (torch.det(R) ** -0.5) * (R ** 0.5)
+            det = (torch.det(R) ** -0.5) * (torch.det(mat1) ** 0.5)
 
             # N by 1 by D (E) -/+ N by D (E) = N by N by D (E)
             diff_m = (input.unsqueeze(1) - input) / 2.
@@ -432,25 +432,22 @@ class GP_ADF_RTSS(Parameterized):
         pred_cov_diag = torch.tensor(list(map(lambda i : self.variance_propagation(input, Beta[i, :], lengthscale[i, :], var[i, :], Kff_inv[i, :, :],
                                                                                    pred_mean_tensor, mean, covariance), range_lis)))
 
-
-        pred_cov_diag = pred_cov_diag / 2.
-        #pred_cov_diag = torch.eye(1)
         if Beta.size()[0] > 1:
             range_lis = [(i ,j) for i in range(0, Beta.size()[0]) for j in range(i, Beta.size()[0])]
             list_cov = list(map(lambda tup : self.covariance_propagation(input, Beta[tup[0], :], lengthscale[tup[0], :], var[tup[0], :], pred_mean_tensor[tup[0]],
                                                                                 Beta[tup[1], :], lengthscale[tup[1], :], var[tup[1], :], pred_mean_tensor[tup[1]],
                                                                                 mean, covariance), range_lis))
 
-        pred_cov_diag = torch.tensor(list_cov).view(pred_mean_tensor.size()[0], -1)
+            pred_cov = torch.ones((Beta.size()[0], Beta.size()[0])) - torch.eye(Beta.size()[0])
+            pred_cov[torch.triu(torch.ones(Beta.size()[0], Beta.size()[0])) == 1] = torch.tensor(list_cov)
+            #pred_cov = torch.mul(pred_cov, torch.eye((Beta.size()[0])) * 0.5)
+            pred_cov = pred_cov + pred_cov.transpose(dim0=0, dim1=1)
+            pred_cov = pred_cov + pred_cov_diag.diag()
 
-        pred_cov = torch.ones((Beta.size()[0], Beta.size()[0])) - torch.eye((Beta.size([0], Beta.size()[0])))
-        pred_cov[torch.triu(torch.ones(Beta.size()[0], Beta.size()[0])) == 1] = pred_cov
-        pred_cov = torch.mul(pred_cov, torch.eye((Beta.size()[0], Beta.size()[0]) * 0.5))
+        else:
+            pred_cov = pred_cov_diag.diag()
 
-        pred_cov = pred_cov + pred_cov.transpose(dim0=0, dim1=1)
-        # pred_covariance_tensor = pred_covariance_tensor + pred_covariance_tensor.transpose(dim0=0, dim1=1)
-        #
-        return pred_mean_tensor, pred_cov_diag
+        return pred_mean_tensor, pred_cov
 
     def step(self):
         """
@@ -497,18 +494,18 @@ class GP_ADF_RTSS(Parameterized):
 
         # first compute the predtion of measurement based on the observation model
         if self.option == "GP":
-            mu_o_curr, sigma_o_curr = self._prediction(self.X_o, self.zip_cached_o, mu_s_curr, sigma_s_curr)
+            mu_o_curr, sigma_o_curr = self._prediction(self.X_o, self.Beta_o, self.lengthscale_o, self.K_o_var, self.Kff_o_inv, mu_s_curr, sigma_s_curr)
             Cov_yx, Cov_xy = self._compute_cov(self.X_o, mu_s_curr, self.mu_o_curr,
                                                self.lengthscale_o, sigma_s_curr, self.K_o_var, self.Beta_o)
         else:
             assert (index != 0 and index <= len(self.Xu_o)), "state transition models have dimension {}, index is {}.".format(len(self.Xu_o), index)
-            mu_s_curr, sigma_s_curr = self._prediction(self.Xu_o[index], self.zip_cached_o, mu_s_curr, sigma_s_curr)
+            mu_o_curr, sigma_o_curr = self._prediction(self.Xu_o[index], self.zip_cached_o, mu_s_curr, sigma_s_curr)
             Cov_yx, Cov_xy = self._compute_cov(self.Xu_o[index], mu_s_curr, self.mu_o_curr,
-                                               self.lengthscale_o, sigma_s_curr, self.K_o_var, self.Beta_o)
+                                              self.lengthscale_o, sigma_s_curr, self.K_o_var, self.Beta_o)
             
         self.mu_o_curr, self.sigma_o_curr = mu_o_curr, sigma_o_curr
 
-        sigma_o_curr_inv = torch.potrs(sigma_o_curr.potrf(upper=False), torch.eye(sigma_o_curr.size()[0]), upper=False)
+        sigma_o_curr_inv = torch.potrs(torch.eye(sigma_o_curr.size()[0]), sigma_o_curr.potrf(upper=False), upper=False)
         mu_hat_s_curr = mu_s_curr + torch.matmul(Cov_xy, torch.matmul(sigma_o_curr_inv, (observation - mu_o_curr)))
         sigma_hat_s_curr = sigma_s_curr - torch.matmul(Cov_xy, torch.matmul(sigma_o_curr_inv, Cov_yx))
 
@@ -518,6 +515,7 @@ class GP_ADF_RTSS(Parameterized):
 
 
         return mu_hat_s_curr, sigma_hat_s_curr
+
 
     def smoothing(self, steps=10):
         """
@@ -567,52 +565,65 @@ class GP_ADF_RTSS(Parameterized):
         mu1 = mu1
         # 1 x D
         mu2 = mu2
-        # a list of D X D, length E
+        # E
+        mu3 = mu3
+        # E by D
         cov_1 = lengthscale
         # D x D
         cov_2 = cov
         # E x 1
         var = var
 
-        # N x E x 1
+        # E x N
         Beta = Beta
 
+        # print(mu1.size())
+        # print(mu2.size())
+        # print(mu3.size())
+        # print(lengthscale.size())
+        # print(cov.size())
+        # print(var.size())
+        # print(Beta.size())
         # E x D x D tensor
-        Mat1 = list(map(lambda x: x.diag(), lengthscale))
+        range_lis = range(0, lengthscale.size()[0])
+        Mat1 = torch.stack(list(map(lambda i: lengthscale[i, :].diag(), range_lis)))
         # E x D x D tensor
-        Mat2 = list(map(lambda x: torch.potrs((x + cov_2).potrf(upper=False), torch.eye(x.size()), upper=False), Mat1))
-        # Mat3 = torch.stack(Mat1) + torch.matmul(torch.stack(Mat1), torch.matmul(Mat2, torch.stack(Mat1)))
-        # Mat4 = cov_2 + torch.matmul(cov_2, torch.matmul(Mat2, cov_2))
+        Mat2 = torch.stack(list(map(lambda i: torch.potrs(torch.eye(cov_2.size()[0]), (Mat1[i, :, :] + cov_2).potrf(upper=False), upper=False), range_lis)))
+        # # Mat3 = torch.stack(Mat1) + torch.matmul(torch.stack(Mat1), torch.matmul(Mat2, torch.stack(Mat1)))
+        # # Mat4 = cov_2 + torch.matmul(cov_2, torch.matmul(Mat2, cov_2))
         # N x E x D x 1
-        Mu = torch.stack(mu1).unsqueeze(1).unsqueeze(-1) \
-             - torch.matmul(torch.stack(Mat1),
-                            torch.matmul(torch.stack(Mat2), torch.stack(mu1).unsqueeze(1).unsqueeze(-1))) \
-             + mu2.unsqueeze(1).unsqueeze(-1) - torch.matmul(cov_2, torch.matmul(torch.stack(Mat2),
+        Mu = mu1.unsqueeze(1).unsqueeze(-1) \
+             - torch.matmul(Mat1,
+                            torch.matmul(Mat2, mu1.unsqueeze(1).unsqueeze(-1))) \
+             + mu2.unsqueeze(1).unsqueeze(-1) - torch.matmul(cov_2, torch.matmul(Mat2,
                                                                                  mu2.unsqueeze(1).unsqueeze(-1)))
         # N x E x D
         Mu = Mu.squeeze(-1)
-
-        #### TODO change it to a lambda func ?
-        range_lis = range(0, mu1.size()[1])
-        Det1_func = list(map(lambda i: torch.det(torch.stack(cov_1)[i, :, :]), range_lis))
-        Det2_func = list(map(lambda i: torch.det((torch.stack(cov_1) + cov_2)[i, :, :]), range_lis))
-
-        # E
-        Det = torch.mul(torch.stack(Det1_func) ** 0.5 * torch.stack(Det2_func) ** -0.5, torch.tensor(var))
-        ####
-
+        # E x 1
+        Det1_func = torch.stack(list(map(lambda i: torch.det(Mat1[i, :, :]), range_lis)))
+        Det2_func = torch.stack(list(map(lambda i: torch.det(Mat1[i, :, :] + cov_2), range_lis)))
+        #
+        # E x 1
+        Det = torch.mul(torch.mul(Det1_func ** 0.5,  Det2_func ** -0.5), torch.tensor(var))
+        # print(Det.size())
+        # ####
+        #
         # N x E x 1 x 1
-        Mat3 = torch.matmul((torch.stack(mu1) - mu2).unsqueeze(1).unsqueeze(1),
-                            torch.matmul(torch.stack(Mat2), (torch.stack(mu1) - mu2).unsqueeze(1).unsqueeze(-1)))
-        Z = torch.mul(Det, torch.exp(-0.5 * Mat3))
+        Mat3 = torch.matmul((mu1 - mu2).unsqueeze(1).unsqueeze(1),
+                            torch.matmul(Mat2, (mu1 - mu2).unsqueeze(1).unsqueeze(-1)))
+        # print(Mat3.size())
+        Z = torch.mul(Det, torch.exp(-0.5 * Mat3.squeeze(-1)))
 
-        # N x E x D
-        Cov_yx = torch.matmul(Beta, torch.mul(Z.squeeze(-1), Mu))
+        # print(Z.transpose(dim0=-1, dim1=0).size())
+        #
+        #N x E x D
+        Cov_xy = torch.mul(Beta, torch.mul(Z, Mu).transpose(dim0=-1, dim1=0))
         # E x D
-        Cov = torch.sum(Cov_yx, dim=0) - torch.ger(mu3, mu2)
-        Cov_T = Cov_yx.transpose(dim0=0, dim1=1)
+        Cov_xy = torch.sum(Cov_xy, dim=-1) - torch.ger(mu2.view(-1), mu3.view(-1))
+        Cov_yx = Cov_xy.transpose(dim0=0, dim1=1)
 
-        return Cov, Cov_T
+        print(Cov_xy.size())
+        return Cov_xy, Cov_yx
 
 
 if __name__ == '__main__':
@@ -766,7 +777,7 @@ if __name__ == '__main__':
     N = 500
     X = dist.Uniform(-10., 10.0).sample(sample_shape=(N,))
     sigma = torch.tensor(0.25)
-    X_next =  0.5 * X + 25 * X / (1 + X ** 2) #+ dist.Normal(0.0, 0.2).sample(sample_shape=(N,))
+    X_next =  0.5 * X + 25 * X / (1 + X ** 2) + dist.Normal(0.0, 0.2).sample(sample_shape=(N,))
     y_observe =  5 * torch.sin(2 * X_next) + dist.Normal(0.0, 0.01).sample(sample_shape=(N,))
 
     zipped_input = list(zip(X, y_observe))
@@ -776,8 +787,11 @@ if __name__ == '__main__':
 
 
         mu_pred, sigma_pred = gp_adf_rtss.prediction(input[0].unsqueeze(-1).unsqueeze(-1), sigma.unsqueeze(-1).unsqueeze(-1))
-
-        print(X_next[i], mu_pred, sigma_pred)
+        # print(mu_pred.size())
+        # print(sigma_pred.size())
+        # print(y_observe[i].size())
+        mu_o_pred, sig_o_pred = gp_adf_rtss.filtering(y_observe[i].unsqueeze(-1).unsqueeze(-1), mu_pred.unsqueeze(-1), sigma_pred)
+        print(X_next[i], mu_o_pred, sig_o_pred)
 
     # print(gp_adf_rtss.state_transition_model_list[0].kernel.get_param("lengthscale"), beta)
     #
