@@ -9,6 +9,8 @@ M. P. Deisenroth, H. Ohlsson, “A General Perspective on Gaussian Filtering and
 
 M. P. Deisenroth, R. Turner, et al, “Robust Filtering and Smoothing with Gaussian Processes,” 2012.
 
+Y. Pan and E. A. Theodorou, "Probabilistic Differential Dynamic Programming,", 2014
+
 
 
 
